@@ -46,7 +46,7 @@ class SiteUnreadMsg(_PluginBase):
     # 插件版本 (Typically sourced from package.v2.json in V2)
     plugin_version = "2.0" # Updated
     # 插件作者 (Typically sourced from package.v2.json in V2)
-    plugin_author = "thsrite"
+    plugin_author = "test"
     # 作者主页 (Typically sourced from package.v2.json in V2)
     author_url = "https://github.com/thsrite"
     # 插件配置项ID前缀 (Typically sourced from package.v2.json in V2)
