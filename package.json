@@ -1,4 +1,15 @@
 {
+    "SiteUnreadMsg2": {
+    "name": "站点未读消息test",
+    "description": "发送站点未读消息test。",
+    "labels": "站点,消息,通知",
+    "version": "1.9.1-v2",
+    "icon": "Synomail_A.png",
+    "author": "test",
+    "level": 2,
+    "v2": true,
+    "prefix": "siteunreadmsg2_"
+  },
     "AutoSignIn": {
         "name": "站点自动签到",
         "description": "自动模拟登录、签到站点。",
