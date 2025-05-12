@@ -40,7 +40,7 @@ class SiteUnreadMsg(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本 (Consider updating for V2, e.g., "2.0" or "1.9.1-v2")
-    plugin_version = "1.9.1-v2"  # Updated version example
+    plugin_version = "2.0"  # Updated version example
     # 插件作者
     plugin_author = "test"
     # 作者主页
