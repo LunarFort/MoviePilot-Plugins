@@ -10,7 +10,7 @@
     "v2": true,
     "prefix": "siteunreadmsg2_"
   },
-    "QmjSign": {
+    "QmjSignPro": {
     "name": "阡陌居签到(代理版)",
     "description": "自动完成阡陌居每日签到，支持失败重试和历史记录",
     "labels": "签到,阡陌居",
@@ -19,6 +19,7 @@
     "author": "madrays, Test",
     "level": 1,
     "v2": true,
+    "prefix": "qmjsign_pro_",
     "history": {
       "v1.2.0": "新增代理访问支持",
       "v1.1.1": "威望红包流程补充先申请再领取；重复签到通知回填铜币；修正文案",
