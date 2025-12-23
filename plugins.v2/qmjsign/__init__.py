@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 class QmjSign(_PluginBase):
     # 插件名称
-    plugin_name = "阡陌居签到"
+    plugin_name = "阡陌居签到Fort"
     # 插件描述
     plugin_desc = "自动完成阡陌居每日签到，支持失败重试和历史记录"
     # 插件图标
