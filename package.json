@@ -1,5 +1,5 @@
 {
-    "SiteUnreadMsg2": {
+    "SiteUnreadMsgV2": {
     "name": "站点未读消息test",
     "description": "发送站点未读消息test。",
     "labels": "站点,消息,通知",
