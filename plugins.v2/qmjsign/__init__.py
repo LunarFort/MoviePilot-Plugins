@@ -33,9 +33,9 @@ from app.schemas import NotificationType
 from concurrent.futures import ThreadPoolExecutor
 
 
-class QmjSign(_PluginBase):
+class QmjSignPro(_PluginBase):
     # 插件名称
-    plugin_name = "阡陌居签到Fort"
+    plugin_name = "阡陌居签到(代理版）"
     # 插件描述
     plugin_desc = "自动完成阡陌居每日签到，支持失败重试和历史记录"
     # 插件图标
@@ -47,9 +47,9 @@ class QmjSign(_PluginBase):
     # 作者主页
     author_url = "https://github.com/LunarFort"
     # 插件配置项ID前缀
-    plugin_config_prefix = "qmjsign_Fort_"
+    plugin_config_prefix = "qmjsign_pro_"
     # 加载顺序
-    plugin_order = 1
+    plugin_order = 2
     # 可使用的用户级别
     auth_level = 2
 
@@ -1046,8 +1046,8 @@ class QmjSign(_PluginBase):
         if self._enabled and self._cron:
             logger.info(f"注册定时服务: {self._cron}")
             return [{
-                "id": "qmjsign",
-                "name": "阡陌居签到",
+                "id": "qmjsign_pro",
+                "name": "阡陌居签到(代理版)",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.sign,
                 "kwargs": {}
