@@ -22,7 +22,7 @@ from app.manager import SiteManager
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 
-# 禁用 SSL 警告
+# 禁用 requests 的 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 尝试导入依赖插件的类型，如果不存在则定义为 Any 以防止报错
@@ -45,7 +45,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     # 插件作者
     plugin_author = "test"
     # 作者主页
@@ -310,7 +310,7 @@ class SiteUnreadMsgV2(_PluginBase):
             return None
         for site_schema_cls in self._site_schema:
             try:
-                # 兼容不同版本的接口，有些版本是 match(html)，有些可能是 match(url, html)
+                # 兼容不同版本的接口
                 if hasattr(site_schema_cls, 'match'):
                     if site_schema_cls.match(html_text):
                         return site_schema_cls
@@ -332,13 +332,16 @@ class SiteUnreadMsgV2(_PluginBase):
 
         session = requests.Session()
         
-        # 手动设置代理
+        # === 核心修改：手动应用代理 ===
         if proxy_enabled and settings.PROXY:
             session.proxies.update(settings.PROXY)
+            logger.debug(f"Site {site_name}: 已启用代理")
         
-        # 手动设置 UA
+        # === 核心修改：手动设置 UA ===
         if ua:
             session.headers.update({"User-Agent": ua})
+        else:
+            session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"})
         
         html_text = None
         try:
@@ -350,16 +353,15 @@ class SiteUnreadMsgV2(_PluginBase):
                 except Exception as e:
                     logger.error(f"Playwright rendering failed for {site_name}: {e}")
             else:
-                # === 核心修改：使用 requests.Session 直接发起请求 ===
+                # === 核心修改：直接使用 session.get 替代 RequestHelper ===
                 try:
                     res = session.get(url, cookies=site_cookie, timeout=30, verify=False)
                     if res and res.status_code == 200:
                         res.encoding = "utf-8" if re.search(r"charset=\"?utf-8\"?", res.text, re.IGNORECASE) else res.apparent_encoding
                         html_text = res.text
                         
-                        # 简单的反爬跳转处理 (兼容原逻辑)
+                        # 简单的反爬跳转处理
                         if "<title>" not in html_text.lower() and "window.location" in html_text:
-                            # 尝试提取跳转 URL
                             match = re.search(r'window\.location\s*=\s*["\']([^"\']+)["\']', html_text)
                             if match:
                                 tmp_url_path = match.group(1)
@@ -369,7 +371,7 @@ class SiteUnreadMsgV2(_PluginBase):
                                 else:
                                     tmp_url = tmp_url_path
                                 
-                                # 再次发起跳转请求
+                                # 跳转请求也使用同一个 session
                                 res = session.get(tmp_url, cookies=site_cookie, timeout=30, verify=False)
                                 if res and res.status_code == 200:
                                     res.encoding = "UTF-8" if "charset=utf-8" in res.text.lower() else res.apparent_encoding
@@ -401,7 +403,7 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.debug(f"Site {site_name} schema not found from HTML content.")
                 return None
             
-            # 初始化 Schema 类，注意参数匹配
+            # 初始化 Schema 类
             return site_schema_cls(
                 site_name=site_name, url=url, site_cookie=site_cookie,
                 apikey=apikey, token=token, index_html=html_text,
