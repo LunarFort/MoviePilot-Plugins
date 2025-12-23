@@ -15,8 +15,6 @@ from ruamel.yaml import CommentedMap
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-# === 引入 PluginManager 用于获取其他插件配置 ===
-from app.core.plugin import PluginManager
 from app.helper.browser import PlaywrightHelper
 from app.helper.module import ModuleHelper
 from app.log import logger
@@ -47,7 +45,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     # 插件作者
     plugin_author = "test"
     # 作者主页
@@ -93,12 +91,10 @@ class SiteUnreadMsgV2(_PluginBase):
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
 
-            # 获取所有站点（包含自定义站点）
+            # 获取所有站点
             all_sites = self._site_oper.list()
-            custom_sites = self.__custom_sites()
             
             valid_site_ids = {str(site.get("id")) for site in all_sites}
-            valid_site_ids.update({str(site.get("id")) for site in custom_sites if site.get("id")})
             
             # 清理配置
             self._unread_sites = [
@@ -168,83 +164,97 @@ class SiteUnreadMsgV2(_PluginBase):
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        sites = self._site_oper.list()
-        custom_sites = self.__custom_sites()
-        
-        site_options = []
-        for site in sites:
-            site_options.append({"title": site.get("name"), "value": str(site.get("id"))})
-        for site in custom_sites:
-            if site.get("id"):
-                site_options.append({"title": site.get("name"), "value": str(site.get("id"))})
+        try:
+            # 安全获取站点列表
+            if self._site_oper:
+                sites = self._site_oper.list()
+            else:
+                self._site_oper = SiteOper()
+                sites = self._site_oper.list()
+            
+            site_options = []
+            for site in sites:
+                # 确保转换为字符串，避免前端比较问题
+                site_id = str(site.get("id"))
+                site_name = site.get("name")
+                site_options.append({"title": site_name, "value": site_id})
 
-        return [
-            {
-                'component': 'VForm',
-                'content': [
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}} ]
-                            },
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}} ]
-                            },
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}} ]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VTextField', 'props': {'model': 'cron', 'label': '执行周期', 'placeholder': '5位cron表达式'}}]
-                            },
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VTextField', 'props': {'model': 'queue_cnt', 'label': '并发数量', 'type': 'number'}}]
-                            },
-                            {
-                                'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                'content': [{'component': 'VTextField', 'props': {'model': 'history_days', 'label': '历史保留天数', 'type': 'number'}}]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'unread_sites', 'label': '监控站点', 'items': site_options}}]
-                            }
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol', 'props': {'cols': 12},
-                                'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件强依赖[站点数据统计]插件的解析逻辑，请确保已安装该插件。'}}]
-                            }
-                        ]
-                    }
-                ]
+            return [
+                {
+                    'component': 'VForm',
+                    'content': [
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}} ]
+                                },
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}} ]
+                                },
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VSwitch', 'props': {'model': 'onlyonce', 'label': '立即运行一次'}} ]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VTextField', 'props': {'model': 'cron', 'label': '执行周期', 'placeholder': '5位cron表达式'}}]
+                                },
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VTextField', 'props': {'model': 'queue_cnt', 'label': '并发数量', 'type': 'number'}}]
+                                },
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                    'content': [{'component': 'VTextField', 'props': {'model': 'history_days', 'label': '历史保留天数', 'type': 'number'}}]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
+                                    'component': 'VCol',
+                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'unread_sites', 'label': '监控站点', 'items': site_options}}]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
+                                    'component': 'VCol', 'props': {'cols': 12},
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件强依赖[站点数据统计]插件的解析逻辑，请确保已安装该插件。'}}]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ], {
+                "enabled": False,
+                "onlyonce": False,
+                "notify": True,
+                "cron": "5 1 * * *",
+                "queue_cnt": 5,
+                "history_days": 30,
+                "unread_sites": []
             }
-        ], {
-            "enabled": False,
-            "onlyonce": False,
-            "notify": True,
-            "cron": "5 1 * * *",
-            "queue_cnt": 5,
-            "history_days": 30,
-            "unread_sites": []
-        }
+        except Exception as e:
+            logger.error(f"获取配置页面失败: {str(e)}")
+            # 返回一个基本的错误表单，防止点击无反应
+            return [
+                {
+                    'component': 'VAlert',
+                    'props': {'type': 'error', 'text': f'加载配置出错: {str(e)}'}
+                }
+            ], {}
 
     def get_page(self) -> List[dict]:
         unread_data = self.get_data("history")
@@ -480,17 +490,14 @@ class SiteUnreadMsgV2(_PluginBase):
 
         with lock:
             all_sites = self._site_oper.list()
-            custom_sites = self.__custom_sites()
-            
-            all_sites_config = [site for site in all_sites] + custom_sites
             
             refresh_sites_config = []
             if not self._unread_sites:
-                refresh_sites_config = all_sites_config
+                refresh_sites_config = all_sites
             else:
                 selected_site_ids = set(self._unread_sites)
                 refresh_sites_config = [
-                    s for s in all_sites_config 
+                    s for s in all_sites 
                     if str(s.get("id")) in selected_site_ids
                 ]
 
@@ -526,16 +533,7 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.info(f"{self.plugin_name}: 检查完成。")
 
     def __custom_sites(self) -> List[Any]:
-        # === 核心修改：使用 PluginManager 获取配置 ===
-        try:
-            manager = PluginManager()
-            plugin = manager.get_plugin("CustomSites")
-            if plugin:
-                config = plugin.get_config()
-                if config and config.get("enabled"):
-                    return config.get("sites", [])
-        except Exception as e:
-            logger.debug(f"获取 CustomSites 插件配置失败: {e}")
+        # 暂时停用从 CustomSites 插件获取配置的功能，避免 API 变更导致的错误
         return []
 
     def __update_config(self):
