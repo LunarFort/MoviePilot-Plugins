@@ -15,10 +15,11 @@ from ruamel.yaml import CommentedMap
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
+# === 引入 PluginManager 用于获取其他插件配置 ===
+from app.core.plugin import PluginManager
 from app.helper.browser import PlaywrightHelper
 from app.helper.module import ModuleHelper
 from app.log import logger
-# === 修改点1：替换 SiteManager 为 SiteOper ===
 from app.db.site_oper import SiteOper
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
@@ -26,7 +27,7 @@ from app.schemas.types import EventType, NotificationType
 # 禁用 requests 的 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 尝试导入依赖插件的类型，如果不存在则定义为 Any 以防止报错
+# 尝试导入依赖插件的类型
 try:
     from app.plugins.sitestatistic.siteuserinfo import ISiteUserInfo
 except ImportError:
@@ -46,7 +47,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.3"
+    plugin_version = "2.5"
     # 插件作者
     plugin_author = "test"
     # 作者主页
@@ -63,7 +64,6 @@ class SiteUnreadMsgV2(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _exits_key: List[str] = []
     _site_schema: List[Type[ISiteUserInfo]] = []
-    # === 修改点2：属性声明改为 SiteOper ===
     _site_oper: SiteOper = None
 
     # Configuration attributes
@@ -76,7 +76,6 @@ class SiteUnreadMsgV2(_PluginBase):
     _unread_sites: List[str] = []
 
     def init_plugin(self, config: dict = None):
-        # === 修改点3：初始化 SiteOper ===
         self._site_oper = SiteOper()
         
         # Stop existing tasks
@@ -94,15 +93,14 @@ class SiteUnreadMsgV2(_PluginBase):
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
 
-            # === 修改点4：使用 SiteOper 获取站点 ===
+            # 获取所有站点（包含自定义站点）
             all_sites = self._site_oper.list()
             custom_sites = self.__custom_sites()
             
-            # 合并内置站点和自定义站点ID
             valid_site_ids = {str(site.get("id")) for site in all_sites}
             valid_site_ids.update({str(site.get("id")) for site in custom_sites if site.get("id")})
             
-            # 清理配置中无效的站点ID
+            # 清理配置
             self._unread_sites = [
                 site_id for site_id in self._unread_sites 
                 if site_id in valid_site_ids
@@ -110,7 +108,7 @@ class SiteUnreadMsgV2(_PluginBase):
             self.__update_config()
 
         if self._enabled or self._onlyonce:
-            # Load modules from sitestatistic plugin
+            # Load modules
             try:
                 loaded_modules = ModuleHelper.load(
                     'app.plugins.sitestatistic.siteuserinfo',
@@ -136,7 +134,6 @@ class SiteUnreadMsgV2(_PluginBase):
                                         run_date=datetime.now(
                                             tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
                                         name=self.plugin_name)
-                # Turn off the one-time switch
                 self._onlyonce = False
                 self.__update_config()
 
@@ -157,7 +154,6 @@ class SiteUnreadMsgV2(_PluginBase):
                         }
                     )
 
-            # Start tasks
             if self._scheduler.get_jobs():
                 self._scheduler.start()
 
@@ -172,16 +168,12 @@ class SiteUnreadMsgV2(_PluginBase):
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        # === 修改点5：使用 SiteOper 获取站点列表 ===
         sites = self._site_oper.list()
         custom_sites = self.__custom_sites()
         
-        # 构建选项列表
         site_options = []
-        # 内置站点
         for site in sites:
             site_options.append({"title": site.get("name"), "value": str(site.get("id"))})
-        # 自定义站点
         for site in custom_sites:
             if site.get("id"):
                 site_options.append({"title": site.get("name"), "value": str(site.get("id"))})
@@ -238,7 +230,7 @@ class SiteUnreadMsgV2(_PluginBase):
                         'content': [
                             {
                                 'component': 'VCol', 'props': {'cols': 12},
-                                'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件强依赖[站点数据统计]插件的解析逻辑，请确保已安装该插件。如解析失败请检查[站点数据统计]插件是否更新。'}}]
+                                'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件强依赖[站点数据统计]插件的解析逻辑，请确保已安装该插件。'}}]
                             }
                         ]
                     }
@@ -313,7 +305,6 @@ class SiteUnreadMsgV2(_PluginBase):
             return None
         for site_schema_cls in self._site_schema:
             try:
-                # 兼容不同版本的接口
                 if hasattr(site_schema_cls, 'match'):
                     if site_schema_cls.match(html_text):
                         return site_schema_cls
@@ -335,12 +326,9 @@ class SiteUnreadMsgV2(_PluginBase):
 
         session = requests.Session()
         
-        # 手动设置代理
         if proxy_enabled and settings.PROXY:
             session.proxies.update(settings.PROXY)
-            logger.debug(f"Site {site_name}: 已启用代理")
         
-        # 手动设置 UA
         if ua:
             session.headers.update({"User-Agent": ua})
         else:
@@ -362,7 +350,6 @@ class SiteUnreadMsgV2(_PluginBase):
                         res.encoding = "utf-8" if re.search(r"charset=\"?utf-8\"?", res.text, re.IGNORECASE) else res.apparent_encoding
                         html_text = res.text
                         
-                        # 简单的反爬跳转处理
                         if "<title>" not in html_text.lower() and "window.location" in html_text:
                             match = re.search(r'window\.location\s*=\s*["\']([^"\']+)["\']', html_text)
                             if match:
@@ -386,7 +373,6 @@ class SiteUnreadMsgV2(_PluginBase):
             if not html_text:
                  return None
 
-            # 兼容性检查：如果是假首页，尝试获取 index.php
             if '"search"' not in html_text and '"csrf-token"' not in html_text:
                 index_php_url = url.rstrip('/') + "/index.php"
                 try:
@@ -404,7 +390,6 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.debug(f"Site {site_name} schema not found from HTML content.")
                 return None
             
-            # 初始化 Schema 类
             return site_schema_cls(
                 site_name=site_name, url=url, site_cookie=site_cookie,
                 apikey=apikey, token=token, index_html=html_text,
@@ -444,20 +429,17 @@ class SiteUnreadMsgV2(_PluginBase):
         if site_user_info.message_unread <= 0:
             return
 
-        # 获取具体消息内容 (依赖 Schema 实现)
         if hasattr(site_user_info, 'message_unread_contents') and site_user_info.message_unread_contents:
             logger.info(f"Site {site_name} has {len(site_user_info.message_unread_contents)} unread messages.")
             for head, date_str, content in site_user_info.message_unread_contents:
                 msg_title = f"【站点 {site_user_info.site_name} 消息】"
                 msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
                 
-                # 生成去重Key
                 key_content_part = str(content)[:50] if content else ""
                 key = f"{site_user_info.site_name}_{date_str}_{head}_{key_content_part}"
 
                 if key not in self._exits_key:
                     self._exits_key.append(key)
-                    # 发送通知
                     eventmanager.send_event(
                         EventType.NoticeMessage,
                         {
@@ -474,10 +456,8 @@ class SiteUnreadMsgV2(_PluginBase):
                         "date": date_str,
                     })
         else:
-            # 只有数量没有详情的 fallback 通知
             title = f"{site_user_info.site_name} 有 {site_user_info.message_unread} 条未读消息"
             text = f"请登录站点查看详情: {site_user_info.url}"
-            # 简单的去重Key，防止短时间内重复发送
             key = f"{site_name}_count_{site_user_info.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
             
             if key not in self._exits_key:
@@ -499,16 +479,13 @@ class SiteUnreadMsgV2(_PluginBase):
         logger.info(f"{self.plugin_name}: 开始检查未读消息...")
 
         with lock:
-            # === 修改点6：使用 SiteOper 获取站点列表 ===
             all_sites = self._site_oper.list()
             custom_sites = self.__custom_sites()
             
-            # 所有的站点配置列表
             all_sites_config = [site for site in all_sites] + custom_sites
             
             refresh_sites_config = []
             if not self._unread_sites:
-                # 默认全选
                 refresh_sites_config = all_sites_config
             else:
                 selected_site_ids = set(self._unread_sites)
@@ -522,7 +499,6 @@ class SiteUnreadMsgV2(_PluginBase):
                 return
 
             self._history = self.get_data("history") or []
-            # 重建 Key 防止重复
             self._exits_key = [
                 f"{rec['site']}_{rec.get('date')}_{rec['head']}_{str(rec.get('content'))[:50]}" 
                 for rec in self._history
@@ -533,7 +509,6 @@ class SiteUnreadMsgV2(_PluginBase):
                 with ThreadPool(pool_size) as p:
                     p.map(self.__refresh_site_data, refresh_sites_config)
 
-            # 清理历史记录
             if self._history:
                 cutoff_timestamp = time.time() - (self._history_days * 24 * 60 * 60)
                 new_history = []
@@ -551,10 +526,16 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.info(f"{self.plugin_name}: 检查完成。")
 
     def __custom_sites(self) -> List[Any]:
-        # 从 CustomSites 插件获取配置
-        custom_sites_plugin_config = self.get_plugin_config("CustomSites")
-        if custom_sites_plugin_config and custom_sites_plugin_config.get("enabled"):
-            return custom_sites_plugin_config.get("sites", [])
+        # === 核心修改：使用 PluginManager 获取配置 ===
+        try:
+            manager = PluginManager()
+            plugin = manager.get_plugin("CustomSites")
+            if plugin:
+                config = plugin.get_config()
+                if config and config.get("enabled"):
+                    return config.get("sites", [])
+        except Exception as e:
+            logger.debug(f"获取 CustomSites 插件配置失败: {e}")
         return []
 
     def __update_config(self):
