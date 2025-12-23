@@ -18,7 +18,8 @@ from app.core.event import eventmanager, Event
 from app.helper.browser import PlaywrightHelper
 from app.helper.module import ModuleHelper
 from app.log import logger
-from app.manager import SiteManager
+# === 修改点1：替换 SiteManager 为 SiteOper ===
+from app.db.site_oper import SiteOper
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 
@@ -38,19 +39,19 @@ lock = Lock()
 
 
 class SiteUnreadMsgV2(_PluginBase):
-    # 插件名称 (修改为 V2)
+    # 插件名称
     plugin_name = "站点未读消息(V2)"
     # 插件描述
     plugin_desc = "轮询站点未读消息并发送通知，适配 MoviePilot V2。"
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     # 插件作者
     plugin_author = "test"
     # 作者主页
     author_url = "https://github.com/LunarFort"
-    # 插件配置项ID前缀 (修改为 v2 专用前缀)
+    # 插件配置项ID前缀
     plugin_config_prefix = "siteunreadmsg_v2_"
     # 加载顺序
     plugin_order = 1
@@ -62,7 +63,8 @@ class SiteUnreadMsgV2(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _exits_key: List[str] = []
     _site_schema: List[Type[ISiteUserInfo]] = []
-    _site_manager: SiteManager = None
+    # === 修改点2：属性声明改为 SiteOper ===
+    _site_oper: SiteOper = None
 
     # Configuration attributes
     _enabled: bool = False
@@ -74,7 +76,8 @@ class SiteUnreadMsgV2(_PluginBase):
     _unread_sites: List[str] = []
 
     def init_plugin(self, config: dict = None):
-        self._site_manager = SiteManager()
+        # === 修改点3：初始化 SiteOper ===
+        self._site_oper = SiteOper()
         
         # Stop existing tasks
         self.stop_service()
@@ -91,8 +94,8 @@ class SiteUnreadMsgV2(_PluginBase):
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
 
-            # 过滤掉不存在或已删除的站点配置
-            all_sites = self._site_manager.get_sites()
+            # === 修改点4：使用 SiteOper 获取站点 ===
+            all_sites = self._site_oper.list()
             custom_sites = self.__custom_sites()
             
             # 合并内置站点和自定义站点ID
@@ -169,8 +172,8 @@ class SiteUnreadMsgV2(_PluginBase):
         pass
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        # 使用 SiteManager 获取站点列表
-        sites = self._site_manager.get_sites()
+        # === 修改点5：使用 SiteOper 获取站点列表 ===
+        sites = self._site_oper.list()
         custom_sites = self.__custom_sites()
         
         # 构建选项列表
@@ -332,12 +335,12 @@ class SiteUnreadMsgV2(_PluginBase):
 
         session = requests.Session()
         
-        # === 核心修改：手动应用代理 ===
+        # 手动设置代理
         if proxy_enabled and settings.PROXY:
             session.proxies.update(settings.PROXY)
             logger.debug(f"Site {site_name}: 已启用代理")
         
-        # === 核心修改：手动设置 UA ===
+        # 手动设置 UA
         if ua:
             session.headers.update({"User-Agent": ua})
         else:
@@ -353,7 +356,6 @@ class SiteUnreadMsgV2(_PluginBase):
                 except Exception as e:
                     logger.error(f"Playwright rendering failed for {site_name}: {e}")
             else:
-                # === 核心修改：直接使用 session.get 替代 RequestHelper ===
                 try:
                     res = session.get(url, cookies=site_cookie, timeout=30, verify=False)
                     if res and res.status_code == 200:
@@ -371,7 +373,6 @@ class SiteUnreadMsgV2(_PluginBase):
                                 else:
                                     tmp_url = tmp_url_path
                                 
-                                # 跳转请求也使用同一个 session
                                 res = session.get(tmp_url, cookies=site_cookie, timeout=30, verify=False)
                                 if res and res.status_code == 200:
                                     res.encoding = "UTF-8" if "charset=utf-8" in res.text.lower() else res.apparent_encoding
@@ -498,7 +499,8 @@ class SiteUnreadMsgV2(_PluginBase):
         logger.info(f"{self.plugin_name}: 开始检查未读消息...")
 
         with lock:
-            all_sites = self._site_manager.get_sites()
+            # === 修改点6：使用 SiteOper 获取站点列表 ===
+            all_sites = self._site_oper.list()
             custom_sites = self.__custom_sites()
             
             # 所有的站点配置列表
