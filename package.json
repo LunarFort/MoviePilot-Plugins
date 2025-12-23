@@ -16,11 +16,11 @@
     "labels": "签到,阡陌居",
     "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/madrays/MoviePilot-Plugins/main/icons/qmj.ico",
-    "author": "madrays, Fort",
+    "author": "madrays, Test",
     "level": 1,
     "v2": true,
     "history": {
-      "v1.2.0": "新增代理访问支持"
+      "v1.2.0": "新增代理访问支持",
       "v1.1.1": "威望红包流程补充先申请再领取；重复签到通知回填铜币；修正文案",
       "v1.1.0": "新增每日威望红包领取开关；解析并汇总财富六项（铜币/威望/贡献/发书数/积分/总积分）；通知与详情页展示优化（奖励列替代天数/积分）；精简日志",
       "v1.0": "首次发布"
