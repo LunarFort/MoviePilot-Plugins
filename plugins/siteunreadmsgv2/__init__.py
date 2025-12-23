@@ -8,6 +8,7 @@ from typing import Optional, Any, List, Dict, Tuple, Type
 
 import pytz
 import requests
+import urllib3
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from ruamel.yaml import CommentedMap
@@ -16,11 +17,13 @@ from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.helper.browser import PlaywrightHelper
 from app.helper.module import ModuleHelper
-from app.helper.request import RequestHelper
 from app.log import logger
 from app.manager import SiteManager
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
+
+# 禁用 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 尝试导入依赖插件的类型，如果不存在则定义为 Any 以防止报错
 try:
@@ -42,7 +45,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "test"
     # 作者主页
@@ -328,9 +331,14 @@ class SiteUnreadMsgV2(_PluginBase):
         render = site_info.get("render")
 
         session = requests.Session()
-        proxies = settings.PROXY if proxy_enabled else None
         
-        # 使用 V2 的 PlaywrightHelper (如果需要渲染)
+        # 手动设置代理
+        if proxy_enabled and settings.PROXY:
+            session.proxies.update(settings.PROXY)
+        
+        # 手动设置 UA
+        if ua:
+            session.headers.update({"User-Agent": ua})
         
         html_text = None
         try:
@@ -342,9 +350,9 @@ class SiteUnreadMsgV2(_PluginBase):
                 except Exception as e:
                     logger.error(f"Playwright rendering failed for {site_name}: {e}")
             else:
-                # 使用 RequestHelper 或 requests 直接请求
+                # === 核心修改：使用 requests.Session 直接发起请求 ===
                 try:
-                    res = RequestHelper(ua=ua, proxies=proxies, session=session).get_res(url=url, cookies=site_cookie)
+                    res = session.get(url, cookies=site_cookie, timeout=30, verify=False)
                     if res and res.status_code == 200:
                         res.encoding = "utf-8" if re.search(r"charset=\"?utf-8\"?", res.text, re.IGNORECASE) else res.apparent_encoding
                         html_text = res.text
@@ -361,7 +369,8 @@ class SiteUnreadMsgV2(_PluginBase):
                                 else:
                                     tmp_url = tmp_url_path
                                 
-                                res = RequestHelper(ua=ua, proxies=proxies, session=session).get_res(url=tmp_url, cookies=site_cookie)
+                                # 再次发起跳转请求
+                                res = session.get(tmp_url, cookies=site_cookie, timeout=30, verify=False)
                                 if res and res.status_code == 200:
                                     res.encoding = "UTF-8" if "charset=utf-8" in res.text.lower() else res.apparent_encoding
                                     html_text = res.text
@@ -377,9 +386,12 @@ class SiteUnreadMsgV2(_PluginBase):
             # 兼容性检查：如果是假首页，尝试获取 index.php
             if '"search"' not in html_text and '"csrf-token"' not in html_text:
                 index_php_url = url.rstrip('/') + "/index.php"
-                res = RequestHelper(ua=ua, proxies=proxies, session=session).get_res(url=index_php_url, cookies=site_cookie)
-                if res and res.status_code == 200:
-                    html_text = res.text
+                try:
+                    res = session.get(index_php_url, cookies=site_cookie, timeout=30, verify=False)
+                    if res and res.status_code == 200:
+                        html_text = res.text
+                except Exception:
+                    pass
 
             if not html_text:
                 return None
