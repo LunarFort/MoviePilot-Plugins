@@ -325,7 +325,11 @@ class SiteUnreadMsgV2(_PluginBase):
                     if userdata:
                         with lock:
                             checked_sites.append(site_name)
-                        logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}")
+                        logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}, 详情数量: {len(userdata.message_unread_contents) if userdata.message_unread_contents else 0}")
+
+                        # 调试：查看消息详情
+                        if userdata.message_unread_contents:
+                            logger.info(f"[{site_name}] 消息详情: {userdata.message_unread_contents}")
 
                         # 处理未读消息
                         if userdata.message_unread > 0:
