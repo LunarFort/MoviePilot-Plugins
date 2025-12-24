@@ -47,13 +47,13 @@ class SiteUnreadMsgV2(_PluginBase):
     # 可使用的用户级别
     auth_level = 2
 
-    # Private attributes
+    # Private attributes - 在 init_plugin 中初始化
     _scheduler: Optional[BackgroundScheduler] = None
-    _history: List[Dict[str, Any]] = []
-    _exits_key: List[str] = []
-    _site_oper: SiteOper = None
-    _sites_helper: SitesHelper = None
-    _site_schemas: List = []
+    _history: List[Dict[str, Any]] = None
+    _exits_key: List[str] = None
+    _site_oper: Optional[SiteOper] = None
+    _sites_helper: Optional[SitesHelper] = None
+    _site_schemas: List = None
 
     # Configuration attributes
     _enabled: bool = False
@@ -62,10 +62,19 @@ class SiteUnreadMsgV2(_PluginBase):
     _notify: bool = False
     _queue_cnt: int = 5
     _history_days: int = 30
-    _unread_sites: List[str] = []
-    _force_check_sites: List[str] = []  # 强制检查的站点ID列表
+    _unread_sites: List[str] = None
+    _force_check_sites: List[str] = None  # 强制检查的站点ID列表
+    _custom_parse_sites: List[str] = None  # 需要自定义解析的站点ID列表
 
     def init_plugin(self, config: dict = None):
+        # 初始化私有属性
+        self._history = []
+        self._exits_key = []
+        self._unread_sites = []
+        self._force_check_sites = []
+        self._custom_parse_sites = []
+        self._site_schemas = []
+
         self._site_oper = SiteOper()
         self._sites_helper = SitesHelper()
 
@@ -92,6 +101,9 @@ class SiteUnreadMsgV2(_PluginBase):
 
             raw_force_check_sites = config.get("force_check_sites") or []
             self._force_check_sites = [str(s_id) for s_id in raw_force_check_sites]
+
+            raw_custom_parse_sites = config.get("custom_parse_sites") or []
+            self._custom_parse_sites = [str(s_id) for s_id in raw_custom_parse_sites]
 
             # 验证站点配置
             self._validate_sites()
@@ -158,10 +170,29 @@ class SiteUnreadMsgV2(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """
+        注册公共定时服务
+        """
+        if not self._enabled or not self._cron:
+            return []
+
+        try:
+            return [{
+                "id": "SiteUnreadMsgV2",
+                "name": "站点未读消息检查",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self.refresh_all_site_unread_msg,
+                "kwargs": {}
+            }]
+        except Exception as e:
+            logger.error(f"{self.plugin_name}: 注册服务失败: {e}")
+            return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         try:
@@ -233,8 +264,17 @@ class SiteUnreadMsgV2(_PluginBase):
                             'component': 'VRow',
                             'content': [
                                 {
+                                    'component': 'VCol',
+                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'custom_parse_sites', 'label': '自定义解析站点（使用layui框架的站点，如春天）', 'items': site_options}}]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
                                     'component': 'VCol', 'props': {'cols': 12},
-                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑。春天站点会自动使用特殊解析器。强制检查站点会额外请求消息页面，仅在首页不显示消息数时使用。'}}]
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '强制检查站点：首页不显示消息数时，会额外请求消息页面检查。自定义解析站点：使用layui框架的站点（如春天），标准解析器无法正确解析，需要使用自定义解析。'}}]
                                 }
                             ]
                         }
@@ -248,7 +288,8 @@ class SiteUnreadMsgV2(_PluginBase):
                 "queue_cnt": 5,
                 "history_days": 30,
                 "unread_sites": [],
-                "force_check_sites": []
+                "force_check_sites": [],
+                "custom_parse_sites": []
             }
         except Exception as e:
             logger.error(f"{self.plugin_name}: 获取配置页面失败: {str(e)}")
@@ -394,7 +435,7 @@ class SiteUnreadMsgV2(_PluginBase):
         site_obj = __get_site_obj()
         if not site_obj:
             if not site.get("public"):
-                logger.warn(f"站点 {site.get('name')} 未找到站点解析器，schema：{site.get('schema')}")
+                logger.warning(f"站点 {site.get('name')} 未找到站点解析器，schema：{site.get('schema')}")
             return None
 
         try:
@@ -412,14 +453,14 @@ class SiteUnreadMsgV2(_PluginBase):
                     site_obj.message_read_force = True
                     site_obj._pase_unread_msgs()
 
-            # 春天站点特殊处理：总是使用自定义解析以确保消息被正确提取
-            # 因为春天站点使用layui框架，标准NexusPHP解析器无法正确解析
-            if site_name == "春天":
-                logger.info(f"[春天] 使用自定义解析器处理消息...")
+            # 自定义解析站点处理：使用layui框架的站点，标准NexusPHP解析器无法正确解析
+            site_id = str(site.get("id", ""))
+            if self._should_custom_parse(site_id):
+                logger.info(f"[{site_name}] 使用自定义解析器处理消息...")
                 # 清除可能由标准解析器产生的错误数据
                 site_obj.message_unread_contents.clear()
                 site_obj.message_unread = 0
-                self._parse_chun_tian_messages(site_obj)
+                self._parse_layui_messages(site_obj)
 
             return SiteUserData(
                 domain=site.get("url"),
@@ -444,8 +485,8 @@ class SiteUnreadMsgV2(_PluginBase):
         finally:
             site_obj.clear()
 
-    def _parse_chun_tian_messages(self, site_obj: SiteParserBase):
-        """自定义解析春天站点的layui框架消息内容"""
+    def _parse_layui_messages(self, site_obj: SiteParserBase):
+        """自定义解析使用layui框架的站点消息内容"""
         from lxml import etree
         from app.utils.string import StringUtils
 
@@ -622,18 +663,16 @@ class SiteUnreadMsgV2(_PluginBase):
         site_id = str(site.get("id", ""))
         site_name = site.get("name", "")
 
-        # 策略1：用户配置的强制检查站点（最高优先级）
+        # 用户配置的强制检查站点
         if site_id in self._force_check_sites:
             logger.debug(f"[{site_name}] 在强制检查列表中")
             return True
 
-        # 策略2：基于站点名称判断（向后兼容）
-        # 这些站点首页不显示消息数，需要强制检查
-        force_sites = ["春天"]
-        if site_name in force_sites:
-            return True
-
         return False
+
+    def _should_custom_parse(self, site_id: str) -> bool:
+        """判断是否需要使用自定义解析"""
+        return site_id in self._custom_parse_sites
 
     def _get_target_sites(self) -> List[dict]:
         """获取要检查的站点列表"""
@@ -662,7 +701,7 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.info(f"[{site_name}] 检测到 {len(userdata.message_unread_contents)} 条消息内容")
             for head, date_str, content in userdata.message_unread_contents:
                 msg_title = f"【站点 {site_name} 消息】"
-                msg_text = f"时间：{date_str}\\n标题：{head}\\n内容：\\n{content}"
+                msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
 
                 key_content_part = str(content)[:50] if content else ""
                 key = f"{site_name}_{date_str}_{head}_{key_content_part}"
@@ -741,10 +780,19 @@ class SiteUnreadMsgV2(_PluginBase):
         site_id_deleted = event.event_data.get("site_id")
         if site_id_deleted:
             site_id_str = str(site_id_deleted)
+            changed = False
             if site_id_str in self._unread_sites:
                 self._unread_sites = [s for s in self._unread_sites if s != site_id_str]
+                changed = True
+            if site_id_str in self._force_check_sites:
+                self._force_check_sites = [s for s in self._force_check_sites if s != site_id_str]
+                changed = True
+            if site_id_str in self._custom_parse_sites:
+                self._custom_parse_sites = [s for s in self._custom_parse_sites if s != site_id_str]
+                changed = True
+            if changed:
                 self.__update_config()
-                logger.info(f"{self.plugin_name}: 站点 {site_id_str} 已从监控列表中移除。")
+                logger.info(f"{self.plugin_name}: 站点 {site_id_str} 已从配置中移除。")
 
     def __update_config(self):
         self.update_config({
@@ -756,4 +804,5 @@ class SiteUnreadMsgV2(_PluginBase):
             "history_days": self._history_days,
             "unread_sites": self._unread_sites,
             "force_check_sites": self._force_check_sites,
+            "custom_parse_sites": self._custom_parse_sites,
         })
