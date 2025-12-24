@@ -484,15 +484,17 @@ class SiteUnreadMsgV2(_PluginBase):
 
             pool_size = min(len(refresh_sites_config), self._queue_cnt)
             checked_sites = []
-            if pool_size > 0 :
-                with ThreadPool(pool_size) as p:
-                    # 使用包装函数来记录站点
-                    def wrapped_refresh(site_info):
-                        site_name = site_info.get('name') if isinstance(site_info, dict) else getattr(site_info, 'name', 'Unknown')
-                        self.__refresh_site_data(site_info)
-                        checked_sites.append(site_name)
 
-                    p.map(wrapped_refresh, refresh_sites_config)
+            if pool_size > 0:
+                # 为了调试，先用单线程模式
+                for site_info in refresh_sites_config:
+                    site_name = site_info.get('name') if isinstance(site_info, dict) else getattr(site_info, 'name', 'Unknown')
+                    try:
+                        self.__refresh_site_data(site_info)
+                    except Exception as e:
+                        logger.error(f"{self.plugin_name}: 处理站点 {site_name} 时出错: {e}")
+                    finally:
+                        checked_sites.append(site_name)
 
             logger.info(f"{self.plugin_name}: 成功检查了 {len(checked_sites)} 个站点消息: {', '.join(checked_sites)}")
 
