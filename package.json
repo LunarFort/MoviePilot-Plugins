@@ -1,7 +1,7 @@
 {
     "SiteUnreadMsgV2": {
-    "name": "站点未读消息test",
-    "description": "发送站点未读消息test。",
+    "name": "站点未读消息(V2)",
+    "description": "发送站点未读消息(V2)。",
     "labels": "站点,消息,通知",
     "version": "3.5",
     "icon": "Synomail_A.png",
