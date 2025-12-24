@@ -35,7 +35,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "3.5"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -449,10 +449,7 @@ class SiteUnreadMsgV2(_PluginBase):
     def _parse_ssd_messages(self, site_obj: SiteParserBase):
         """
         春天站点特殊处理：
-        - 消息详情页面结构与标准 NexusPhp 不同，需要自定义解析
-        - 支持两种情况：
-          1. 标准解析器已解析到未读数 (message_unread > 0)
-          2. 首页显示"有新短讯"图片但未解析到数字
+        检测首页是否有"有新短讯"图片，有则获取消息详情
         """
         from lxml import etree
         from app.utils.string import StringUtils
@@ -460,14 +457,7 @@ class SiteUnreadMsgV2(_PluginBase):
         site_name = getattr(site_obj, '_site_name', '未知站点')
 
         try:
-            # 情况1: 标准解析器已经解析到未读消息数
-            if site_obj.message_unread > 0:
-                logger.info(f"[{site_name}] 检测到 {site_obj.message_unread} 条未读消息，开始获取详情...")
-                self._parse_ssd_unread_msgs(site_obj)
-                logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
-                return
-
-            # 情况2: 标准解析器未解析到，检测首页是否有"有新短讯"图片
+            # 获取首页
             index_html = site_obj._get_page_content(
                 url=site_obj._base_url,
                 params=site_obj._user_basic_params,
@@ -486,10 +476,10 @@ class SiteUnreadMsgV2(_PluginBase):
             # 检测是否包含"有新短讯"图片
             new_msg_indicator = html.xpath('//img[contains(@title, "有新短讯")]')
             if not new_msg_indicator:
-                logger.debug(f"[{site_name}] 无未读消息")
+                logger.debug(f"[{site_name}] 无新短讯")
                 return
 
-            logger.info(f"[{site_name}] 检测到'有新短讯'图片，开始获取消息...")
+            logger.info(f"[{site_name}] 检测到'有新短讯'，开始获取消息...")
             self._parse_ssd_unread_msgs(site_obj)
             logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
 
