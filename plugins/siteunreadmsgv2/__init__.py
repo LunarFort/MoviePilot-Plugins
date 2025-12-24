@@ -45,7 +45,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.6"
+    plugin_version = "2.8"
     # 插件作者
     plugin_author = "test"
     # 作者主页
@@ -94,7 +94,17 @@ class SiteUnreadMsgV2(_PluginBase):
             # 获取所有站点
             all_sites = self._site_oper.list()
             
-            valid_site_ids = {str(site.get("id")) for site in all_sites}
+            # === 修复点1：使用 getattr 安全获取对象属性 ===
+            valid_site_ids = set()
+            for site in all_sites:
+                # 兼容对象(site.id)和字典(site['id'])
+                if isinstance(site, dict):
+                    s_id = site.get("id")
+                else:
+                    s_id = getattr(site, "id", None)
+                
+                if s_id:
+                    valid_site_ids.add(str(s_id))
             
             # 清理配置
             self._unread_sites = [
@@ -174,10 +184,17 @@ class SiteUnreadMsgV2(_PluginBase):
             
             site_options = []
             for site in sites:
-                # 确保转换为字符串，避免前端比较问题
-                site_id = str(site.get("id"))
-                site_name = site.get("name")
-                site_options.append({"title": site_name, "value": site_id})
+                # === 修复点2：使用 getattr 安全获取属性，禁止使用 .get() ===
+                # 判断是字典还是对象，分别处理
+                if isinstance(site, dict):
+                    site_id = str(site.get("id", ""))
+                    site_name = site.get("name", "")
+                else:
+                    site_id = str(getattr(site, "id", ""))
+                    site_name = getattr(site, "name", "")
+                
+                if site_id and site_name:
+                    site_options.append({"title": site_name, "value": site_id})
 
             return [
                 {
@@ -248,7 +265,6 @@ class SiteUnreadMsgV2(_PluginBase):
             }
         except Exception as e:
             logger.error(f"获取配置页面失败: {str(e)}")
-            # 返回一个基本的错误表单，防止点击无反应
             return [
                 {
                     'component': 'VAlert',
@@ -496,10 +512,17 @@ class SiteUnreadMsgV2(_PluginBase):
                 refresh_sites_config = all_sites
             else:
                 selected_site_ids = set(self._unread_sites)
-                refresh_sites_config = [
-                    s for s in all_sites 
-                    if str(s.get("id")) in selected_site_ids
-                ]
+                
+                # === 修复点3：在 refresh 逻辑中也安全获取 ID ===
+                refresh_sites_config = []
+                for s in all_sites:
+                    if isinstance(s, dict):
+                        sid = str(s.get("id", ""))
+                    else:
+                        sid = str(getattr(s, "id", ""))
+                    
+                    if sid in selected_site_ids:
+                        refresh_sites_config.append(s)
 
             if not refresh_sites_config:
                 logger.info(f"{self.plugin_name}: 未配置监控站点。")
@@ -533,7 +556,6 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.info(f"{self.plugin_name}: 检查完成。")
 
     def __custom_sites(self) -> List[Any]:
-        # 暂时停用从 CustomSites 插件获取配置的功能，避免 API 变更导致的错误
         return []
 
     def __update_config(self):
