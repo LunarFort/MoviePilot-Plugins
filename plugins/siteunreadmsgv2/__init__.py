@@ -447,10 +447,11 @@ class SiteUnreadMsgV2(_PluginBase):
         """
         春天站点特殊处理：
         - 首页用"有新短讯"表示有新消息，而不是数字
-        - 消息列表页面是标准表格格式，可以用本体的标准解析
+        - 消息列表和详情页面结构与标准 NexusPhp 不同，需要自定义解析
         """
         from lxml import etree
         from app.utils.string import StringUtils
+        from urllib.parse import urljoin
 
         site_name = getattr(site_obj, '_site_name', '未知站点')
 
@@ -479,9 +480,8 @@ class SiteUnreadMsgV2(_PluginBase):
 
             logger.info(f"[{site_name}] 检测到'有新短讯'，开始获取消息...")
 
-            # 使用本体的标准解析流程
-            site_obj.message_read_force = True
-            site_obj._pase_unread_msgs()
+            # 自定义解析春天站点消息
+            self._parse_ssd_unread_msgs(site_obj)
 
             logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
 
@@ -489,6 +489,109 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.error(f"[{site_name}] 解析出错: {e}")
             import traceback
             logger.error(f"[{site_name}] 详细错误: {traceback.format_exc()}")
+
+    def _parse_ssd_unread_msgs(self, site_obj: SiteParserBase):
+        """
+        春天站点自定义消息解析
+        """
+        from lxml import etree
+        from app.utils.string import StringUtils
+        from urllib.parse import urljoin
+
+        site_name = getattr(site_obj, '_site_name', '未知站点')
+        base_url = site_obj._base_url
+
+        # 获取未读消息列表页面
+        unread_msg_links = []
+        for box_type in ["1", "-2"]:  # 1=收件箱, -2=系统消息
+            list_url = f"messages.php?action=viewmailbox&box={box_type}&unread=yes"
+            list_html = site_obj._get_page_content(
+                url=urljoin(base_url, list_url),
+                params=site_obj._mail_unread_params,
+                headers=site_obj._mail_unread_headers
+            )
+            if not list_html:
+                continue
+
+            html = etree.HTML(list_html)
+            if not StringUtils.is_valid_html_element(html):
+                continue
+
+            # 获取未读消息链接 - 排除已读消息（有 Read 图标的）
+            msg_links = html.xpath('//tr[not(./td/img[@alt="Read"])]/td/a[contains(@href, "viewmessage")]/@href')
+            unread_msg_links.extend(msg_links)
+            logger.debug(f"[{site_name}] box={box_type} 找到 {len(msg_links)} 条未读消息链接")
+
+        # 更新未读消息数
+        if unread_msg_links:
+            site_obj.message_unread = len(unread_msg_links)
+
+        # 解析每条消息的内容
+        for msg_link in unread_msg_links:
+            msg_url = urljoin(base_url, msg_link)
+            logger.debug(f"[{site_name}] 获取消息: {msg_url}")
+
+            msg_html = site_obj._get_page_content(
+                url=msg_url,
+                params=site_obj._mail_content_params,
+                headers=site_obj._mail_content_headers
+            )
+            if not msg_html:
+                continue
+
+            head, date, content = self._parse_ssd_message_content(msg_html, site_name)
+            logger.debug(f"[{site_name}] 解析结果 - 标题: {head}, 时间: {date}, 内容: {content[:50] if content else None}...")
+            site_obj.message_unread_contents.append((head, date, content))
+
+    def _parse_ssd_message_content(self, html_text: str, site_name: str = "春天"):
+        """
+        解析春天站点消息详情页面
+
+        春天站点消息结构：
+        - 标题: h1 标签
+        - 时间: <span title="2025-12-24 13:36:41"> 的 title 属性
+        - 内容: <td class="rowfollow" colspan="2">
+        """
+        from lxml import etree
+        from app.utils.string import StringUtils
+
+        html = etree.HTML(html_text)
+        try:
+            if not StringUtils.is_valid_html_element(html):
+                return None, None, None
+
+            message_head_text = None
+            message_date_text = None
+            message_content_text = None
+
+            # === 解析标题 ===
+            # 春天站点标题在 h1 标签
+            message_head = html.xpath('//h1/text()')
+            if message_head:
+                message_head_text = message_head[-1].strip()
+
+            # === 解析时间 ===
+            # 春天站点时间在 span 的 title 属性中，格式: <span title="2025-12-24 13:36:41">
+            date_span = html.xpath('//td[@class="rowfollow"]//span[@title]/@title')
+            if date_span:
+                message_date_text = date_span[0].strip()
+
+            # === 解析内容 ===
+            # 春天站点内容在 colspan="2" 的 td 中
+            content_td = html.xpath('//td[@class="rowfollow" and @colspan="2"]')
+            if content_td:
+                message_content_text = content_td[0].xpath("string(.)").strip()
+
+            logger.debug(f"[{site_name}] 消息解析 - 标题: {message_head_text}, 时间: {message_date_text}, 内容: {message_content_text[:50] if message_content_text else None}")
+
+            return message_head_text, message_date_text, message_content_text
+
+        except Exception as e:
+            logger.error(f"[{site_name}] 解析消息内容出错: {e}")
+            return None, None, None
+        finally:
+            if html is not None:
+                del html
 
     def _get_target_sites(self) -> List[dict]:
         """获取要检查的站点列表"""
