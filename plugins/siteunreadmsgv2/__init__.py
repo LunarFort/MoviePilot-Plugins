@@ -35,7 +35,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "3.2"
+    plugin_version = "3.3"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -63,6 +63,7 @@ class SiteUnreadMsgV2(_PluginBase):
     _queue_cnt: int = 5
     _history_days: int = 30
     _unread_sites: List[str] = []
+    _force_check_sites: List[str] = []  # 强制检查的站点ID列表
 
     def init_plugin(self, config: dict = None):
         self._site_oper = SiteOper()
@@ -88,6 +89,9 @@ class SiteUnreadMsgV2(_PluginBase):
 
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
+
+            raw_force_check_sites = config.get("force_check_sites") or []
+            self._force_check_sites = [str(s_id) for s_id in raw_force_check_sites]
 
             # 验证站点配置
             self._validate_sites()
@@ -220,8 +224,17 @@ class SiteUnreadMsgV2(_PluginBase):
                             'component': 'VRow',
                             'content': [
                                 {
+                                    'component': 'VCol',
+                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'force_check_sites', 'label': '强制检查站点（首页不显示消息数的站点）', 'items': site_options}}]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': [
+                                {
                                     'component': 'VCol', 'props': {'cols': 12},
-                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑，无需依赖其他插件。'}}]
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑。强制检查站点会额外请求消息页面，仅在首页不显示消息数时使用。'}}]
                                 }
                             ]
                         }
@@ -234,7 +247,8 @@ class SiteUnreadMsgV2(_PluginBase):
                 "cron": "5 1 * * *",
                 "queue_cnt": 5,
                 "history_days": 30,
-                "unread_sites": []
+                "unread_sites": [],
+                "force_check_sites": []
             }
         except Exception as e:
             logger.error(f"{self.plugin_name}: 获取配置页面失败: {str(e)}")
@@ -362,7 +376,7 @@ class SiteUnreadMsgV2(_PluginBase):
             return None
 
     def _get_site_userdata(self, site: dict) -> Optional[SiteUserData]:
-        """获取站点用户数据 - 绕过SiteChain，直接使用解析器并强制消息读取"""
+        """获取站点用户数据 - 智能解析策略"""
         def __get_site_obj() -> Optional[SiteParserBase]:
             """获取站点解析器"""
             for site_schema in self._site_schemas:
@@ -383,13 +397,26 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.warn(f"站点 {site.get('name')} 未找到站点解析器，schema：{site.get('schema')}")
             return None
 
-        # 强制设置消息读取标志，确保即使 message_unread=0 也会解析消息
-        site_obj.message_read_force = True
-
         try:
-            logger.info(f"站点 {site.get('name')} 开始以 {site.get('schema')} 模型解析数据...")
+            site_name = site.get("name")
+            logger.info(f"站点 {site_name} 开始以 {site.get('schema')} 模型解析数据...")
             site_obj.parse()
-            logger.debug(f"站点 {site.get('name')} 数据解析完成")
+            logger.debug(f"站点 {site_name} 数据解析完成")
+
+            # 智能策略：如果首页检测到消息数，正常流程已处理
+            # 如果首页未检测到消息数，但用户配置了强制检查，则读取消息
+            if site_obj.message_unread == 0 and self._notify:
+                # 检查是否需要强制读取（基于配置或特定站点）
+                if self._should_force_check(site):
+                    logger.info(f"[{site_name}] 首页未检测到消息，尝试强制检查消息页面...")
+                    site_obj.message_read_force = True
+                    site_obj._pase_unread_msgs()
+
+            # 春天站点详细调试
+            if site_name == "春天" and site_obj.message_unread_contents:
+                logger.info(f"[春天] === 消息内容调试 ===")
+                for i, (head, date, content) in enumerate(site_obj.message_unread_contents):
+                    logger.info(f"[春天] 消息[{i}]: head='{head}', date='{date}', content='{content}'")
 
             return SiteUserData(
                 domain=site.get("url"),
@@ -413,6 +440,22 @@ class SiteUnreadMsgV2(_PluginBase):
             )
         finally:
             site_obj.clear()
+
+    def _should_force_check(self, site: dict) -> bool:
+        """判断是否需要强制检查消息页面"""
+        site_id = str(site.get("id", ""))
+        site_name = site.get("name", "")
+
+        # 策略1：用户配置的强制检查站点（最高优先级）
+        if site_id in self._force_check_sites:
+            logger.debug(f"[{site_name}] 在强制检查列表中")
+            return True
+
+        # 策略2：基于站点名称判断（向后兼容）
+        if site_name in ["春天"]:
+            return True
+
+        return False
 
     def _get_target_sites(self) -> List[dict]:
         """获取要检查的站点列表"""
@@ -534,4 +577,5 @@ class SiteUnreadMsgV2(_PluginBase):
             "queue_cnt": self._queue_cnt,
             "history_days": self._history_days,
             "unread_sites": self._unread_sites,
+            "force_check_sites": self._force_check_sites,
         })
