@@ -35,7 +35,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "3.5"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -63,16 +63,12 @@ class SiteUnreadMsgV2(_PluginBase):
     _queue_cnt: int = 5
     _history_days: int = 30
     _unread_sites: List[str] = None
-    _force_check_sites: List[str] = None  # 强制检查的站点ID列表
-    _custom_parse_sites: List[str] = None  # 需要自定义解析的站点ID列表
 
     def init_plugin(self, config: dict = None):
         # 初始化私有属性
         self._history = []
         self._exits_key = []
         self._unread_sites = []
-        self._force_check_sites = []
-        self._custom_parse_sites = []
         self._site_schemas = []
 
         self._site_oper = SiteOper()
@@ -98,12 +94,6 @@ class SiteUnreadMsgV2(_PluginBase):
 
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
-
-            raw_force_check_sites = config.get("force_check_sites") or []
-            self._force_check_sites = [str(s_id) for s_id in raw_force_check_sites]
-
-            raw_custom_parse_sites = config.get("custom_parse_sites") or []
-            self._custom_parse_sites = [str(s_id) for s_id in raw_custom_parse_sites]
 
             # 验证站点配置
             self._validate_sites()
@@ -255,26 +245,8 @@ class SiteUnreadMsgV2(_PluginBase):
                             'component': 'VRow',
                             'content': [
                                 {
-                                    'component': 'VCol',
-                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'force_check_sites', 'label': '强制检查站点（首页不显示消息数的站点）', 'items': site_options}}]
-                                }
-                            ]
-                        },
-                        {
-                            'component': 'VRow',
-                            'content': [
-                                {
-                                    'component': 'VCol',
-                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'custom_parse_sites', 'label': '自定义解析站点（使用layui框架的站点，如春天）', 'items': site_options}}]
-                                }
-                            ]
-                        },
-                        {
-                            'component': 'VRow',
-                            'content': [
-                                {
                                     'component': 'VCol', 'props': {'cols': 12},
-                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '强制检查站点：首页不显示消息数时，会额外请求消息页面检查。自定义解析站点：使用layui框架的站点（如春天），标准解析器无法正确解析，需要使用自定义解析。'}}]
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件已内置春天等特殊站点的支持，无需额外配置。'}}]
                                 }
                             ]
                         }
@@ -287,9 +259,7 @@ class SiteUnreadMsgV2(_PluginBase):
                 "cron": "5 1 * * *",
                 "queue_cnt": 5,
                 "history_days": 30,
-                "unread_sites": [],
-                "force_check_sites": [],
-                "custom_parse_sites": []
+                "unread_sites": []
             }
         except Exception as e:
             logger.error(f"{self.plugin_name}: 获取配置页面失败: {str(e)}")
@@ -440,27 +410,15 @@ class SiteUnreadMsgV2(_PluginBase):
 
         try:
             site_name = site.get("name")
+            site_id = str(site.get("id", ""))
             logger.info(f"站点 {site_name} 开始以 {site.get('schema')} 模型解析数据...")
             site_obj.parse()
             logger.debug(f"站点 {site_name} 数据解析完成")
 
-            # 智能策略：如果首页检测到消息数，正常流程已处理
-            # 如果首页未检测到消息数，但用户配置了强制检查，则读取消息
-            if site_obj.message_unread == 0 and self._notify:
-                # 检查是否需要强制读取（基于配置或特定站点）
-                if self._should_force_check(site):
-                    logger.info(f"[{site_name}] 首页未检测到消息，尝试强制检查消息页面...")
-                    site_obj.message_read_force = True
-                    site_obj._pase_unread_msgs()
-
-            # 自定义解析站点处理：使用layui框架的站点，标准NexusPHP解析器无法正确解析
-            site_id = str(site.get("id", ""))
-            if self._should_custom_parse(site_id):
-                logger.info(f"[{site_name}] 使用自定义解析器处理消息...")
-                # 清除可能由标准解析器产生的错误数据
-                site_obj.message_unread_contents.clear()
-                site_obj.message_unread = 0
-                self._parse_layui_messages(site_obj)
+            # 春天站点特殊处理：首页用"有新短讯"表示有新消息，需要额外检测
+            if site_obj.message_unread == 0 and site_name == "春天":
+                logger.info(f"[{site_name}] 使用自定义解析器...")
+                self._parse_ssd_messages(site_obj)
 
             return SiteUserData(
                 domain=site.get("url"),
@@ -485,194 +443,52 @@ class SiteUnreadMsgV2(_PluginBase):
         finally:
             site_obj.clear()
 
-    def _parse_layui_messages(self, site_obj: SiteParserBase):
-        """自定义解析使用layui框架的站点消息内容"""
+    def _parse_ssd_messages(self, site_obj: SiteParserBase):
+        """
+        春天站点特殊处理：
+        - 首页用"有新短讯"表示有新消息，而不是数字
+        - 消息列表页面是标准表格格式，可以用本体的标准解析
+        """
         from lxml import etree
         from app.utils.string import StringUtils
 
-        # 获取站点名称用于日志
         site_name = getattr(site_obj, '_site_name', '未知站点')
 
         try:
-            # 获取消息列表页面
-            msg_list_html = site_obj._get_page_content(
-                url=urljoin(site_obj._base_url, site_obj._user_mail_unread_page),
-                params=site_obj._mail_unread_params,
-                headers=site_obj._mail_unread_headers
+            # 先检测首页是否有"有新短讯"标识
+            index_html = site_obj._get_page_content(
+                url=site_obj._base_url,
+                params=site_obj._user_basic_params,
+                headers=site_obj._user_basic_headers
             )
 
-            if not msg_list_html:
-                logger.info(f"[{site_name}] 无法获取消息列表页面")
+            if not index_html:
+                logger.info(f"[{site_name}] 无法获取首页")
                 return
 
-            # === 自定义解析消息链接（针对layui框架）===
-            msg_links = []
-            html = etree.HTML(msg_list_html)
+            html = etree.HTML(index_html)
             if not StringUtils.is_valid_html_element(html):
-                logger.info(f"[{site_name}] 消息列表HTML无效")
+                logger.info(f"[{site_name}] 首页HTML无效")
                 return
 
-            # 方法1: 标准NexusPHP格式
-            links = html.xpath('//tr[not(./td/img[@alt="Read"])]/td/a[contains(@href, "viewmessage")]/@href')
-            if links:
-                msg_links.extend(links)
-                logger.debug(f"[{site_name}] 方法1找到 {len(links)} 条链接")
-
-            # 方法2: layui框架的卡片式布局
-            if not msg_links:
-                links = html.xpath('//div[contains(@class, "layui-card")]//a[contains(@href, "viewmessage")]/@href')
-                if links:
-                    msg_links.extend(links)
-                    logger.debug(f"[{site_name}] 方法2找到 {len(links)} 条链接")
-
-            # 方法3: 任意包含viewmessage的链接
-            if not msg_links:
-                links = html.xpath('//a[contains(@href, "viewmessage")]/@href')
-                if links:
-                    msg_links.extend(links)
-                    logger.debug(f"[{site_name}] 方法3找到 {len(links)} 条链接")
-
-            # 去重
-            msg_links = list(set(msg_links))
-
-            if not msg_links:
-                logger.info(f"[{site_name}] 未找到消息链接")
+            # 检测是否包含"有新短讯"
+            new_msg_indicator = html.xpath('//img[contains(@title, "有新短讯")]')
+            if not new_msg_indicator:
+                logger.debug(f"[{site_name}] 首页未检测到'有新短讯'标识，跳过")
                 return
 
-            logger.info(f"[{site_name}] 找到 {len(msg_links)} 条消息链接，开始逐个解析...")
+            logger.info(f"[{site_name}] 检测到'有新短讯'，开始获取消息...")
 
-            # 逐个解析消息内容
-            for msg_link in msg_links:
-                msg_url = urljoin(site_obj._base_url, msg_link)
-                msg_html = site_obj._get_page_content(
-                    url=msg_url,
-                    params=site_obj._mail_content_params,
-                    headers=site_obj._mail_content_headers
-                )
+            # 使用本体的标准解析流程
+            site_obj.message_read_force = True
+            site_obj._pase_unread_msgs()
 
-                if not msg_html:
-                    logger.info(f"[{site_name}] 无法获取消息内容: {msg_url}")
-                    continue
-
-                # 使用自定义XPath解析
-                html = etree.HTML(msg_html)
-                if not StringUtils.is_valid_html_element(html):
-                    logger.info(f"[{site_name}] HTML无效: {msg_url}")
-                    continue
-
-                # === 标题解析 ===
-                head = None
-                head_nodes = html.xpath('//h1/text()')
-                if head_nodes:
-                    head = head_nodes[0].strip()
-                    logger.debug(f"[{site_name}] 标题: {head}")
-
-                # === 时间解析 ===
-                date = None
-
-                # 方法1: layui-card-header 中的 span
-                date_nodes = html.xpath('//div[@class="layui-card-header"]//span[2]/text()')
-                if date_nodes:
-                    date = date_nodes[0].strip()
-
-                # 方法2: layui-card-header 中 span 的 title 属性
-                if not date:
-                    date_nodes = html.xpath('//div[@class="layui-card-header"]//span/@title')
-                    if date_nodes:
-                        date = date_nodes[0].strip()
-
-                # 方法3: 标准NexusPHP格式
-                if not date:
-                    date_nodes = html.xpath('//h1/following-sibling::table[.//tr/td[@class="colhead"]]//tr[2]/td[2]//text()')
-                    if date_nodes:
-                        date = date_nodes[0].strip()
-
-                # 方法4: span title 属性
-                if not date:
-                    date_nodes = html.xpath('//span[@title]/@title')
-                    if date_nodes:
-                        date = date_nodes[0].strip()
-
-                # 方法5: 表格第二行
-                if not date:
-                    date_nodes = html.xpath('//table//tr[2]//td[2]//text()')
-                    if date_nodes:
-                        date = date_nodes[0].strip()
-
-                if date:
-                    date = StringUtils.unify_datetime_str(date)
-
-                # === 内容解析 ===
-                content = None
-
-                # 方法1: layui-card-body
-                content_nodes = html.xpath('//div[@class="layui-card-body"]//text()')
-                if content_nodes:
-                    content = ' '.join([n.strip() for n in content_nodes if n.strip()])
-
-                # 方法2: 标准NexusPHP格式
-                if not content:
-                    content_nodes = html.xpath('//h1/following-sibling::table[.//tr/td[@class="colhead"]]//tr[3]/td//text()')
-                    if content_nodes:
-                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
-
-                # 方法3: 表格第三行 [colspan="2"]
-                if not content:
-                    content_nodes = html.xpath('//table//tr[3]//td[@colspan="2"]//text()')
-                    if content_nodes:
-                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
-
-                # 方法4: 包含"感谢"的文本
-                if not content:
-                    content_nodes = html.xpath('//td[contains(text(), "感谢")]/text()')
-                    if content_nodes:
-                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
-
-                # 方法5: 查找所有 td 的文本
-                if not content:
-                    content_nodes = html.xpath('//td//text()')
-                    if content_nodes:
-                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
-
-                logger.debug(f"[{site_name}] 解析结果 - 标题='{head}', 时间='{date}', 内容='{content[:50] if content else None}...'")
-
-                # 添加到结果
-                if head or date or content:
-                    # 如果某个字段缺失，从上下文补全
-                    if not head:
-                        head = "无标题"
-                    if not date:
-                        date = "未知时间"
-                    if not content:
-                        content = "无内容"
-                    site_obj.message_unread_contents.append((head, date, content))
-
-            # 更新未读消息数
-            if site_obj.message_unread_contents:
-                site_obj.message_unread = len(site_obj.message_unread_contents)
-
-            logger.info(f"[{site_name}] 自定义解析完成: {len(site_obj.message_unread_contents)} 条消息")
+            logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
 
         except Exception as e:
-            logger.error(f"[{site_name}] 自定义解析出错: {e}")
+            logger.error(f"[{site_name}] 解析出错: {e}")
             import traceback
             logger.error(f"[{site_name}] 详细错误: {traceback.format_exc()}")
-
-    def _should_force_check(self, site: dict) -> bool:
-        """判断是否需要强制检查消息页面"""
-        site_id = str(site.get("id", ""))
-        site_name = site.get("name", "")
-
-        # 用户配置的强制检查站点
-        if site_id in self._force_check_sites:
-            logger.debug(f"[{site_name}] 在强制检查列表中")
-            return True
-
-        return False
-
-    def _should_custom_parse(self, site_id: str) -> bool:
-        """判断是否需要使用自定义解析"""
-        return site_id in self._custom_parse_sites
 
     def _get_target_sites(self) -> List[dict]:
         """获取要检查的站点列表"""
@@ -780,17 +596,8 @@ class SiteUnreadMsgV2(_PluginBase):
         site_id_deleted = event.event_data.get("site_id")
         if site_id_deleted:
             site_id_str = str(site_id_deleted)
-            changed = False
             if site_id_str in self._unread_sites:
                 self._unread_sites = [s for s in self._unread_sites if s != site_id_str]
-                changed = True
-            if site_id_str in self._force_check_sites:
-                self._force_check_sites = [s for s in self._force_check_sites if s != site_id_str]
-                changed = True
-            if site_id_str in self._custom_parse_sites:
-                self._custom_parse_sites = [s for s in self._custom_parse_sites if s != site_id_str]
-                changed = True
-            if changed:
                 self.__update_config()
                 logger.info(f"{self.plugin_name}: 站点 {site_id_str} 已从配置中移除。")
 
@@ -803,6 +610,4 @@ class SiteUnreadMsgV2(_PluginBase):
             "queue_cnt": self._queue_cnt,
             "history_days": self._history_days,
             "unread_sites": self._unread_sites,
-            "force_check_sites": self._force_check_sites,
-            "custom_parse_sites": self._custom_parse_sites,
         })
