@@ -3,7 +3,7 @@
     "name": "站点未读消息(V2)",
     "description": "发送站点未读消息(V2)。",
     "labels": "站点,消息,通知",
-    "version": "3.5",
+    "version": "2.0",
     "icon": "Synomail_A.png",
     "author": "test",
     "level": 2,
