@@ -357,11 +357,15 @@ class SiteUnreadMsgV2(_PluginBase):
 
     def _handle_unread_messages(self, site_name: str, userdata):
         """处理未读消息"""
+        logger.info(f"[{site_name}] 开始处理未读消息，数量: {userdata.message_unread}")
+
         if not self._notify:
+            logger.info(f"[{site_name}] 通知功能未启用，跳过发送")
             return
 
         # 有详细内容
         if userdata.message_unread_contents and len(userdata.message_unread_contents) > 0:
+            logger.info(f"[{site_name}] 检测到 {len(userdata.message_unread_contents)} 条消息内容")
             for head, date_str, content in userdata.message_unread_contents:
                 msg_title = f"【站点 {site_name} 消息】"
                 msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
@@ -369,7 +373,11 @@ class SiteUnreadMsgV2(_PluginBase):
                 key_content_part = str(content)[:50] if content else ""
                 key = f"{site_name}_{date_str}_{head}_{key_content_part}"
 
+                logger.info(f"[{site_name}] 消息key: {key}")
+                logger.info(f"[{site_name}] 已存在key: {self._exits_key}")
+
                 if key not in self._exits_key:
+                    logger.info(f"[{site_name}] 新消息，准备发送通知")
                     self._exits_key.append(key)
 
                     # 发送通知
@@ -379,6 +387,7 @@ class SiteUnreadMsgV2(_PluginBase):
                         text=msg_text,
                         link=userdata.url if hasattr(userdata, 'url') else None
                     )
+                    logger.info(f"[{site_name}] 通知已发送: {msg_title}")
 
                     # 保存历史
                     self._history.append({
@@ -388,21 +397,26 @@ class SiteUnreadMsgV2(_PluginBase):
                         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "date": date_str,
                     })
+                else:
+                    logger.info(f"[{site_name}] 消息已存在，跳过发送")
         else:
             # 只有数量没有内容
+            logger.info(f"[{site_name}] 无消息详情内容，仅数量: {userdata.message_unread}")
             title = f"站点 {site_name} 有 {userdata.message_unread} 条未读消息"
             text = f"请登录站点查看详情"
             key = f"{site_name}_count_{userdata.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
 
             if key not in self._exits_key:
                 self._exits_key.append(key)
-
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title=title,
                     text=text,
                     link=userdata.url if hasattr(userdata, 'url') else None
                 )
+                logger.info(f"[{site_name}] 数量通知已发送")
+            else:
+                logger.info(f"[{site_name}] 数量通知已存在，跳过")
 
     def _cleanup_history(self):
         """清理历史记录"""
