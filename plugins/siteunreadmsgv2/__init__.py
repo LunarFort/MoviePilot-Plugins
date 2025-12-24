@@ -1,36 +1,24 @@
-import re
 import time
 import warnings
 from datetime import datetime, timedelta
 from multiprocessing.dummy import Pool as ThreadPool
 from threading import Lock
-from typing import Optional, Any, List, Dict, Tuple, Type
+from typing import Optional, Any, List, Dict, Tuple
 
 import pytz
-import requests
-import urllib3
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from ruamel.yaml import CommentedMap
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
-from app.helper.browser import PlaywrightHelper
-from app.helper.module import ModuleHelper
 from app.log import logger
 from app.db.site_oper import SiteOper
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
-
-# 禁用 requests 的 SSL 警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# 尝试导入依赖插件的类型
-try:
-    from app.plugins.sitestatistic.siteuserinfo import ISiteUserInfo
-except ImportError:
-    ISiteUserInfo = Any
-    logger.warning("依赖插件 [站点数据统计] 未安装或无法导入，本插件将无法正常工作。")
+from app.modules.indexer.parser import SiteParserBase
+from app.helper.module import ModuleHelper
+from app.utils.string import StringUtils
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -45,9 +33,9 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "2.8"
+    plugin_version = "3.0"
     # 插件作者
-    plugin_author = "test"
+    plugin_author = "Test"
     # 作者主页
     author_url = "https://github.com/LunarFort"
     # 插件配置项ID前缀
@@ -61,8 +49,8 @@ class SiteUnreadMsgV2(_PluginBase):
     _scheduler: Optional[BackgroundScheduler] = None
     _history: List[Dict[str, Any]] = []
     _exits_key: List[str] = []
-    _site_schema: List[Type[ISiteUserInfo]] = []
     _site_oper: SiteOper = None
+    _site_schemas: List[SiteParserBase] = []
 
     # Configuration attributes
     _enabled: bool = False
@@ -75,9 +63,15 @@ class SiteUnreadMsgV2(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         self._site_oper = SiteOper()
-        
+
         # Stop existing tasks
         self.stop_service()
+
+        # Load site schemas
+        self._site_schemas = ModuleHelper.load(
+            'app.modules.indexer.parser',
+            filter_func=lambda _, obj: hasattr(obj, 'schema') and getattr(obj, 'schema') is not None
+        )
 
         # Configuration
         if config:
@@ -87,14 +81,14 @@ class SiteUnreadMsgV2(_PluginBase):
             self._notify = config.get("notify", True)
             self._queue_cnt = int(config.get("queue_cnt", 5))
             self._history_days = int(config.get("history_days", 30))
-            
+
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
 
             # 获取所有站点
             all_sites = self._site_oper.list()
-            
-            # === 修复点1：使用 getattr 安全获取对象属性 ===
+
+            # 使用 getattr 安全获取对象属性
             valid_site_ids = set()
             for site in all_sites:
                 # 兼容对象(site.id)和字典(site['id'])
@@ -102,34 +96,18 @@ class SiteUnreadMsgV2(_PluginBase):
                     s_id = site.get("id")
                 else:
                     s_id = getattr(site, "id", None)
-                
+
                 if s_id:
                     valid_site_ids.add(str(s_id))
-            
+
             # 清理配置
             self._unread_sites = [
-                site_id for site_id in self._unread_sites 
+                site_id for site_id in self._unread_sites
                 if site_id in valid_site_ids
             ]
             self.__update_config()
 
         if self._enabled or self._onlyonce:
-            # Load modules
-            try:
-                loaded_modules = ModuleHelper.load(
-                    'app.plugins.sitestatistic.siteuserinfo',
-                    filter_func=lambda _, obj: hasattr(obj, 'schema')
-                )
-                if loaded_modules:
-                    self._site_schema = loaded_modules
-                    self._site_schema.sort(key=lambda x: getattr(x, 'order', 99))
-                else:
-                    self._site_schema = []
-                    logger.warning(f"{self.plugin_name}: 未找到站点适配规则，请确保[站点数据统计]插件已安装并启用。")
-            except Exception as e:
-                logger.error(f"{self.plugin_name}: 加载依赖模块失败: {e}")
-                self._site_schema = []
-
             # Scheduler service
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
@@ -181,10 +159,10 @@ class SiteUnreadMsgV2(_PluginBase):
             else:
                 self._site_oper = SiteOper()
                 sites = self._site_oper.list()
-            
+
             site_options = []
             for site in sites:
-                # === 修复点2：使用 getattr 安全获取属性，禁止使用 .get() ===
+                # 使用 getattr 安全获取属性
                 # 判断是字典还是对象，分别处理
                 if isinstance(site, dict):
                     site_id = str(site.get("id", ""))
@@ -192,7 +170,7 @@ class SiteUnreadMsgV2(_PluginBase):
                 else:
                     site_id = str(getattr(site, "id", ""))
                     site_name = getattr(site, "name", "")
-                
+
                 if site_id and site_name:
                     site_options.append({"title": site_name, "value": site_id})
 
@@ -248,7 +226,7 @@ class SiteUnreadMsgV2(_PluginBase):
                             'content': [
                                 {
                                     'component': 'VCol', 'props': {'cols': 12},
-                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件强依赖[站点数据统计]插件的解析逻辑，请确保已安装该插件。'}}]
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑，无需依赖其他插件。'}}]
                                 }
                             ]
                         }
@@ -326,107 +304,61 @@ class SiteUnreadMsgV2(_PluginBase):
         except Exception as e:
             logger.error(f"停止插件服务失败: {str(e)}")
 
-    def __build_class(self, html_text: str) -> Optional[Type[ISiteUserInfo]]:
-        if not self._site_schema:
-            return None
-        for site_schema_cls in self._site_schema:
-            try:
-                if hasattr(site_schema_cls, 'match'):
-                    if site_schema_cls.match(html_text):
-                        return site_schema_cls
-            except Exception as e:
-                logger.debug(f"Schema matching error for {getattr(site_schema_cls, '__name__', 'Unknown')}: {e}")
-        return None
-
-    def build(self, site_info: CommentedMap) -> Optional[ISiteUserInfo]:
+    def build(self, site_info: CommentedMap) -> Optional[SiteParserBase]:
+        """
+        使用MoviePilot内置的站点解析器构建站点用户信息
+        """
         site_cookie = site_info.get("cookie")
         if not site_cookie:
             return None
+
         site_name = site_info.get("name")
+        url = site_info.get("url")
+        if not url:
+            return None
+
+        # 获取站点schema
+        schema = site_info.get("schema")
+        if not schema:
+            logger.debug(f"Site {site_name} has no schema defined")
+            return None
+
+        # 查找匹配的解析器
+        site_parser = None
+        for site_schema in self._site_schemas:
+            if site_schema.schema.value == schema:
+                site_parser = site_schema
+                break
+
+        if not site_parser:
+            logger.debug(f"Site {site_name} schema {schema} not found")
+            return None
+
         apikey = site_info.get("apikey")
         token = site_info.get("token")
-        url = site_info.get("url")
         proxy_enabled = site_info.get("proxy", False)
         ua = site_info.get("ua")
-        render = site_info.get("render")
 
-        session = requests.Session()
-        
-        if proxy_enabled and settings.PROXY:
-            session.proxies.update(settings.PROXY)
-        
-        if ua:
-            session.headers.update({"User-Agent": ua})
-        else:
-            session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"})
-        
-        html_text = None
         try:
-            if render:
-                try:
-                    html_text = PlaywrightHelper().get_page_source(url=url,
-                                                                   cookies=site_cookie,
-                                                                   ua=ua)
-                except Exception as e:
-                    logger.error(f"Playwright rendering failed for {site_name}: {e}")
-            else:
-                try:
-                    res = session.get(url, cookies=site_cookie, timeout=30, verify=False)
-                    if res and res.status_code == 200:
-                        res.encoding = "utf-8" if re.search(r"charset=\"?utf-8\"?", res.text, re.IGNORECASE) else res.apparent_encoding
-                        html_text = res.text
-                        
-                        if "<title>" not in html_text.lower() and "window.location" in html_text:
-                            match = re.search(r'window\.location\s*=\s*["\']([^"\']+)["\']', html_text)
-                            if match:
-                                tmp_url_path = match.group(1)
-                                if not tmp_url_path.startswith(('http:', 'https:')):
-                                    from urllib.parse import urljoin
-                                    tmp_url = urljoin(url, tmp_url_path)
-                                else:
-                                    tmp_url = tmp_url_path
-                                
-                                res = session.get(tmp_url, cookies=site_cookie, timeout=30, verify=False)
-                                if res and res.status_code == 200:
-                                    res.encoding = "UTF-8" if "charset=utf-8" in res.text.lower() else res.apparent_encoding
-                                    html_text = res.text
-
-                    elif res:
-                        logger.debug(f"Site {site_name} request failed: {res.status_code}")
-                except Exception as req_e:
-                    logger.debug(f"Site {site_name} connection error: {req_e}")
-
-            if not html_text:
-                 return None
-
-            if '"search"' not in html_text and '"csrf-token"' not in html_text:
-                index_php_url = url.rstrip('/') + "/index.php"
-                try:
-                    res = session.get(index_php_url, cookies=site_cookie, timeout=30, verify=False)
-                    if res and res.status_code == 200:
-                        html_text = res.text
-                except Exception:
-                    pass
-
-            if not html_text:
-                return None
-
-            site_schema_cls = self.__build_class(html_text)
-            if not site_schema_cls:
-                logger.debug(f"Site {site_name} schema not found from HTML content.")
-                return None
-            
-            return site_schema_cls(
-                site_name=site_name, url=url, site_cookie=site_cookie,
-                apikey=apikey, token=token, index_html=html_text,
-                session=session, ua=ua, proxy=proxy_enabled
+            # 使用MoviePilot内置的站点解析器
+            site_obj = site_parser(
+                site_name=site_name,
+                url=url,
+                site_cookie=site_cookie,
+                apikey=apikey,
+                token=token,
+                ua=ua,
+                proxy=proxy_enabled
             )
+
+            # 执行解析
+            site_obj.parse()
+
+            return site_obj
 
         except Exception as e:
             logger.error(f"Error building site info for {site_name}: {e}")
             return None
-        finally:
-            session.close()
 
     def __refresh_site_data(self, site_info: CommentedMap):
         site_name = site_info.get('name')
@@ -434,10 +366,8 @@ class SiteUnreadMsgV2(_PluginBase):
             return
 
         try:
-            site_user_info: Optional[ISiteUserInfo] = self.build(site_info=site_info)
+            site_user_info: Optional[SiteParserBase] = self.build(site_info=site_info)
             if site_user_info:
-                site_user_info.parse()
-
                 if site_user_info.err_msg and site_user_info.message_unread <= 0:
                     logger.debug(f"Site {site_name} parse warning: {site_user_info.err_msg}")
                     return
@@ -448,7 +378,7 @@ class SiteUnreadMsgV2(_PluginBase):
         except Exception as e:
             logger.error(f"Site {site_name} refresh error: {str(e)}")
 
-    def __notify_unread_msg(self, site_name: str, site_user_info: ISiteUserInfo):
+    def __notify_unread_msg(self, site_name: str, site_user_info: SiteParserBase):
         if not self._notify:
             return
 
@@ -460,7 +390,7 @@ class SiteUnreadMsgV2(_PluginBase):
             for head, date_str, content in site_user_info.message_unread_contents:
                 msg_title = f"【站点 {site_user_info.site_name} 消息】"
                 msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
-                
+
                 key_content_part = str(content)[:50] if content else ""
                 key = f"{site_user_info.site_name}_{date_str}_{head}_{key_content_part}"
 
@@ -485,7 +415,7 @@ class SiteUnreadMsgV2(_PluginBase):
             title = f"{site_user_info.site_name} 有 {site_user_info.message_unread} 条未读消息"
             text = f"请登录站点查看详情: {site_user_info.url}"
             key = f"{site_name}_count_{site_user_info.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
-            
+
             if key not in self._exits_key:
                 self._exits_key.append(key)
                 eventmanager.send_event(
@@ -498,29 +428,28 @@ class SiteUnreadMsgV2(_PluginBase):
                 )
 
     def refresh_all_site_unread_msg(self):
-        if not self._site_schema:
-             logger.warning(f"{self.plugin_name}: 缺少依赖插件模块，跳过运行。")
-             return
+        if not self._site_schemas:
+            logger.warning(f"{self.plugin_name}: 未加载到站点解析器，跳过运行。")
+            return
 
         logger.info(f"{self.plugin_name}: 开始检查未读消息...")
 
         with lock:
             all_sites = self._site_oper.list()
-            
+
             refresh_sites_config = []
             if not self._unread_sites:
                 refresh_sites_config = all_sites
             else:
                 selected_site_ids = set(self._unread_sites)
-                
-                # === 修复点3：在 refresh 逻辑中也安全获取 ID ===
+
                 refresh_sites_config = []
                 for s in all_sites:
                     if isinstance(s, dict):
                         sid = str(s.get("id", ""))
                     else:
                         sid = str(getattr(s, "id", ""))
-                    
+
                     if sid in selected_site_ids:
                         refresh_sites_config.append(s)
 
@@ -530,7 +459,7 @@ class SiteUnreadMsgV2(_PluginBase):
 
             self._history = self.get_data("history") or []
             self._exits_key = [
-                f"{rec['site']}_{rec.get('date')}_{rec['head']}_{str(rec.get('content'))[:50]}" 
+                f"{rec['site']}_{rec.get('date')}_{rec['head']}_{str(rec.get('content'))[:50]}"
                 for rec in self._history
             ]
 
@@ -549,7 +478,7 @@ class SiteUnreadMsgV2(_PluginBase):
                             new_history.append(record)
                     except Exception:
                         pass
-                
+
                 self._history = new_history
                 self.save_data("history", self._history)
 
