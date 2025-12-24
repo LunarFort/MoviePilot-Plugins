@@ -415,9 +415,12 @@ class SiteUnreadMsgV2(_PluginBase):
             site_obj.parse()
             logger.debug(f"站点 {site_name} 数据解析完成")
 
-            # 春天站点特殊处理：首页用"有新短讯"表示有新消息，需要额外检测
-            if site_obj.message_unread == 0 and site_name == "春天":
+            # 春天站点特殊处理：消息详情页面结构不同，需要自定义解析
+            # 无论标准解析器是否解析到未读数，都使用自定义解析器获取消息内容
+            if site_name == "春天":
                 logger.info(f"[{site_name}] 使用自定义解析器...")
+                # 清空标准解析器可能解析到的不完整内容
+                site_obj.message_unread_contents.clear()
                 self._parse_ssd_messages(site_obj)
 
             return SiteUserData(
@@ -446,17 +449,25 @@ class SiteUnreadMsgV2(_PluginBase):
     def _parse_ssd_messages(self, site_obj: SiteParserBase):
         """
         春天站点特殊处理：
-        - 首页用"有新短讯"表示有新消息，而不是数字
-        - 消息列表和详情页面结构与标准 NexusPhp 不同，需要自定义解析
+        - 消息详情页面结构与标准 NexusPhp 不同，需要自定义解析
+        - 支持两种情况：
+          1. 标准解析器已解析到未读数 (message_unread > 0)
+          2. 首页显示"有新短讯"图片但未解析到数字
         """
         from lxml import etree
         from app.utils.string import StringUtils
-        from urllib.parse import urljoin
 
         site_name = getattr(site_obj, '_site_name', '未知站点')
 
         try:
-            # 先检测首页是否有"有新短讯"标识
+            # 情况1: 标准解析器已经解析到未读消息数
+            if site_obj.message_unread > 0:
+                logger.info(f"[{site_name}] 检测到 {site_obj.message_unread} 条未读消息，开始获取详情...")
+                self._parse_ssd_unread_msgs(site_obj)
+                logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
+                return
+
+            # 情况2: 标准解析器未解析到，检测首页是否有"有新短讯"图片
             index_html = site_obj._get_page_content(
                 url=site_obj._base_url,
                 params=site_obj._user_basic_params,
@@ -472,17 +483,14 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.info(f"[{site_name}] 首页HTML无效")
                 return
 
-            # 检测是否包含"有新短讯"
+            # 检测是否包含"有新短讯"图片
             new_msg_indicator = html.xpath('//img[contains(@title, "有新短讯")]')
             if not new_msg_indicator:
-                logger.debug(f"[{site_name}] 首页未检测到'有新短讯'标识，跳过")
+                logger.debug(f"[{site_name}] 无未读消息")
                 return
 
-            logger.info(f"[{site_name}] 检测到'有新短讯'，开始获取消息...")
-
-            # 自定义解析春天站点消息
+            logger.info(f"[{site_name}] 检测到'有新短讯'图片，开始获取消息...")
             self._parse_ssd_unread_msgs(site_obj)
-
             logger.info(f"[{site_name}] 解析完成: {len(site_obj.message_unread_contents)} 条消息")
 
         except Exception as e:
