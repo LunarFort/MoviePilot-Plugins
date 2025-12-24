@@ -325,11 +325,22 @@ class SiteUnreadMsgV2(_PluginBase):
                     if userdata:
                         with lock:
                             checked_sites.append(site_name)
+
+                        # 详细诊断
                         logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}, 详情数量: {len(userdata.message_unread_contents) if userdata.message_unread_contents else 0}")
+
+                        # 调试信息
+                        logger.info(f"[{site_name}] user_level={userdata.user_level}, userid={userdata.userid}, username={userdata.username}")
+                        logger.info(f"[{site_name}] err_msg={userdata.err_msg}")
 
                         # 调试：查看消息详情
                         if userdata.message_unread_contents:
                             logger.info(f"[{site_name}] 消息详情: {userdata.message_unread_contents}")
+
+                        # 即使未读数为0，也检测一下消息页面
+                        if userdata.message_unread == 0:
+                            logger.info(f"[{site_name}] 尝试直连消息页面...")
+                            self._debug_check_message_page(site, site_name)
 
                         # 处理未读消息
                         if userdata.message_unread > 0:
@@ -435,6 +446,55 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.info(f"[{site_name}] 数量通知已发送")
             else:
                 logger.info(f"[{site_name}] 数量通知已存在，跳过")
+
+    def _debug_check_message_page(self, site: dict, site_name: str):
+        """调试：直接检查消息页面"""
+        try:
+            from app.utils.http import RequestUtils
+            from urllib.parse import urljoin
+            import re
+
+            url = site.get("url")
+            cookie = site.get("cookie")
+            ua = site.get("ua")
+
+            if not url or not cookie:
+                logger.info(f"[{site_name}] 无URL或Cookie，无法直连")
+                return
+
+            # 消息页面URL
+            msg_url = urljoin(url, "messages.php?action=viewmailbox&box=1&unread=yes")
+
+            logger.info(f"[{site_name}] 直连消息页面: {msg_url}")
+
+            req = RequestUtils(
+                cookies=cookie,
+                headers={"User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            )
+
+            resp = req.get(msg_url)
+            if resp and resp.status_code == 200:
+                html = resp.text
+                logger.info(f"[{site_name}] 消息页面响应成功，长度: {len(html)}")
+
+                # 检查是否有消息
+                if "messages.php" in html.lower() or "message" in html.lower():
+                    logger.info(f"[{site_name}] 消息页面包含message关键词")
+
+                    # 提取消息数量
+                    msg_count_match = re.search(r'(\d+)', html)
+                    if msg_count_match:
+                        logger.info(f"[{site_name}] 发现数字: {msg_count_match.group(1)}")
+
+                    # 保存HTML用于分析（前2000字符）
+                    logger.info(f"[{site_name}] HTML前500字符: {html[:500]}")
+                else:
+                    logger.info(f"[{site_name}] 消息页面无消息相关内容")
+            else:
+                logger.info(f"[{site_name}] 消息页面访问失败: {resp.status_code if resp else 'None'}")
+
+        except Exception as e:
+            logger.error(f"[{site_name}] 直连消息页面出错: {e}")
 
     def _cleanup_history(self):
         """清理历史记录"""
