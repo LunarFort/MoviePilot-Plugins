@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from multiprocessing.dummy import Pool as ThreadPool
 from threading import Lock
 from typing import Optional, Any, List, Dict, Tuple
+from urllib.parse import urljoin
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -17,8 +18,9 @@ from app.db.site_oper import SiteOper
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.helper.sites import SitesHelper
-from app.chain.site import SiteChain
-from app.schemas import Notification
+from app.schemas import SiteUserData
+from app.modules.indexer.parser import SiteParserBase
+from app.helper.module import ModuleHelper
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -33,7 +35,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "3.1"
+    plugin_version = "3.2"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -51,6 +53,7 @@ class SiteUnreadMsgV2(_PluginBase):
     _exits_key: List[str] = []
     _site_oper: SiteOper = None
     _sites_helper: SitesHelper = None
+    _site_schemas: List = []
 
     # Configuration attributes
     _enabled: bool = False
@@ -64,6 +67,12 @@ class SiteUnreadMsgV2(_PluginBase):
     def init_plugin(self, config: dict = None):
         self._site_oper = SiteOper()
         self._sites_helper = SitesHelper()
+
+        # 加载站点解析器
+        self._site_schemas = ModuleHelper.load(
+            'app.modules.indexer.parser',
+            filter_func=lambda _, obj: hasattr(obj, 'schema') and getattr(obj, 'schema') is not None
+        )
 
         # Stop existing tasks
         self.stop_service()
@@ -310,57 +319,12 @@ class SiteUnreadMsgV2(_PluginBase):
                 for rec in self._history
             ]
 
-            # 使用SiteChain刷新数据
-            site_chain = SiteChain()
-            checked_sites = []
-            lock = Lock()
+            # 使用线程池处理
+            with ThreadPool(self._queue_cnt) as pool:
+                results = pool.map(self._check_site, sites)
 
-            # 并发处理函数
-            def process_site(site):
-                site_name = site.get("name", "Unknown")
-                try:
-                    logger.info(f"[{site_name}] 开始刷新...")
-                    userdata = site_chain.refresh_userdata(site)
-
-                    if userdata:
-                        with lock:
-                            checked_sites.append(site_name)
-
-                        # 详细诊断
-                        logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}, 详情数量: {len(userdata.message_unread_contents) if userdata.message_unread_contents else 0}")
-
-                        # 调试信息
-                        logger.info(f"[{site_name}] user_level={userdata.user_level}, userid={userdata.userid}, username={userdata.username}")
-                        logger.info(f"[{site_name}] err_msg={userdata.err_msg}")
-
-                        # 调试：查看消息详情
-                        if userdata.message_unread_contents:
-                            logger.info(f"[{site_name}] 消息详情: {userdata.message_unread_contents}")
-
-                        # 即使未读数为0，也检测一下消息页面
-                        if userdata.message_unread == 0:
-                            logger.info(f"[{site_name}] 尝试直连消息页面...")
-                            self._debug_check_message_page(site, site_name)
-
-                        # 处理未读消息
-                        if userdata.message_unread > 0:
-                            self._handle_unread_messages(site_name, userdata)
-                    else:
-                        logger.info(f"[{site_name}] 刷新失败或无数据")
-
-                except Exception as e:
-                    logger.error(f"[{site_name}] 刷新出错: {e}")
-
-            # 使用线程池并发处理
-            pool_size = min(len(sites), self._queue_cnt)
-            if pool_size > 1:
-                logger.info(f"{self.plugin_name}: 使用 {pool_size} 个线程并发处理")
-                with ThreadPool(pool_size) as pool:
-                    pool.map(process_site, sites)
-            else:
-                # 单线程处理
-                for site in sites:
-                    process_site(site)
+            # 统计结果
+            checked_sites = [r for r in results if r]
 
             # 清理历史记录
             self._cleanup_history()
@@ -369,6 +333,86 @@ class SiteUnreadMsgV2(_PluginBase):
 
         except Exception as e:
             logger.error(f"{self.plugin_name}: 主任务执行失败: {e}")
+
+    def _check_site(self, site: dict) -> Optional[str]:
+        """检查单个站点"""
+        site_name = site.get("name", "Unknown")
+        try:
+            logger.info(f"[{site_name}] 开始刷新...")
+
+            # 直接使用解析器，绕过SiteChain的限制
+            userdata = self._get_site_userdata(site)
+
+            if not userdata:
+                logger.info(f"[{site_name}] 刷新失败或无数据")
+                return None
+
+            # 详细诊断 - 所有站点
+            logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}, 详情数量: {len(userdata.message_unread_contents) if userdata.message_unread_contents else 0}")
+
+            # 处理未读消息
+            if userdata.message_unread > 0 or (userdata.message_unread_contents and len(userdata.message_unread_contents) > 0):
+                self._handle_unread_messages(site_name, userdata)
+                return site_name
+
+            return site_name
+
+        except Exception as e:
+            logger.error(f"[{site_name}] 刷新出错: {e}")
+            return None
+
+    def _get_site_userdata(self, site: dict) -> Optional[SiteUserData]:
+        """获取站点用户数据 - 绕过SiteChain，直接使用解析器并强制消息读取"""
+        def __get_site_obj() -> Optional[SiteParserBase]:
+            """获取站点解析器"""
+            for site_schema in self._site_schemas:
+                if site_schema.schema.value == site.get("schema"):
+                    return site_schema(
+                        site_name=site.get("name"),
+                        url=site.get("url"),
+                        site_cookie=site.get("cookie"),
+                        apikey=site.get("apikey"),
+                        token=site.get("token"),
+                        ua=site.get("ua"),
+                        proxy=site.get("proxy"))
+            return None
+
+        site_obj = __get_site_obj()
+        if not site_obj:
+            if not site.get("public"):
+                logger.warn(f"站点 {site.get('name')} 未找到站点解析器，schema：{site.get('schema')}")
+            return None
+
+        # 强制设置消息读取标志，确保即使 message_unread=0 也会解析消息
+        site_obj.message_read_force = True
+
+        try:
+            logger.info(f"站点 {site.get('name')} 开始以 {site.get('schema')} 模型解析数据...")
+            site_obj.parse()
+            logger.debug(f"站点 {site.get('name')} 数据解析完成")
+
+            return SiteUserData(
+                domain=site.get("url"),
+                userid=site_obj.userid,
+                username=site_obj.username,
+                user_level=site_obj.user_level,
+                join_at=site_obj.join_at,
+                upload=site_obj.upload,
+                download=site_obj.download,
+                ratio=site_obj.ratio,
+                bonus=site_obj.bonus,
+                seeding=site_obj.seeding,
+                seeding_size=site_obj.seeding_size,
+                seeding_info=site_obj.seeding_info.copy() if site_obj.seeding_info else [],
+                leeching=site_obj.leeching,
+                leeching_size=site_obj.leeching_size,
+                message_unread=site_obj.message_unread,
+                message_unread_contents=site_obj.message_unread_contents.copy() if site_obj.message_unread_contents else [],
+                updated_day=datetime.now().strftime('%Y-%m-%d'),
+                err_msg=site_obj.err_msg
+            )
+        finally:
+            site_obj.clear()
 
     def _get_target_sites(self) -> List[dict]:
         """获取要检查的站点列表"""
@@ -397,7 +441,7 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.info(f"[{site_name}] 检测到 {len(userdata.message_unread_contents)} 条消息内容")
             for head, date_str, content in userdata.message_unread_contents:
                 msg_title = f"【站点 {site_name} 消息】"
-                msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
+                msg_text = f"时间：{date_str}\\n标题：{head}\\n内容：\\n{content}"
 
                 key_content_part = str(content)[:50] if content else ""
                 key = f"{site_name}_{date_str}_{head}_{key_content_part}"
@@ -407,7 +451,9 @@ class SiteUnreadMsgV2(_PluginBase):
 
                 if key not in self._exits_key:
                     logger.info(f"[{site_name}] 新消息，准备发送通知")
-                    self._exits_key.append(key)
+
+                    with lock:
+                        self._exits_key.append(key)
 
                     # 发送通知
                     self.post_message(
@@ -419,13 +465,14 @@ class SiteUnreadMsgV2(_PluginBase):
                     logger.info(f"[{site_name}] 通知已发送: {msg_title}")
 
                     # 保存历史
-                    self._history.append({
-                        "site": site_name,
-                        "head": head,
-                        "content": content,
-                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "date": date_str,
-                    })
+                    with lock:
+                        self._history.append({
+                            "site": site_name,
+                            "head": head,
+                            "content": content,
+                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "date": date_str,
+                        })
                 else:
                     logger.info(f"[{site_name}] 消息已存在，跳过发送")
         else:
@@ -436,7 +483,8 @@ class SiteUnreadMsgV2(_PluginBase):
             key = f"{site_name}_count_{userdata.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
 
             if key not in self._exits_key:
-                self._exits_key.append(key)
+                with lock:
+                    self._exits_key.append(key)
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title=title,
@@ -446,55 +494,6 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.info(f"[{site_name}] 数量通知已发送")
             else:
                 logger.info(f"[{site_name}] 数量通知已存在，跳过")
-
-    def _debug_check_message_page(self, site: dict, site_name: str):
-        """调试：直接检查消息页面"""
-        try:
-            from app.utils.http import RequestUtils
-            from urllib.parse import urljoin
-            import re
-
-            url = site.get("url")
-            cookie = site.get("cookie")
-            ua = site.get("ua")
-
-            if not url or not cookie:
-                logger.info(f"[{site_name}] 无URL或Cookie，无法直连")
-                return
-
-            # 消息页面URL
-            msg_url = urljoin(url, "messages.php?action=viewmailbox&box=1&unread=yes")
-
-            logger.info(f"[{site_name}] 直连消息页面: {msg_url}")
-
-            req = RequestUtils(
-                cookies=cookie,
-                headers={"User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            )
-
-            resp = req.get(msg_url)
-            if resp and resp.status_code == 200:
-                html = resp.text
-                logger.info(f"[{site_name}] 消息页面响应成功，长度: {len(html)}")
-
-                # 检查是否有消息
-                if "messages.php" in html.lower() or "message" in html.lower():
-                    logger.info(f"[{site_name}] 消息页面包含message关键词")
-
-                    # 提取消息数量
-                    msg_count_match = re.search(r'(\d+)', html)
-                    if msg_count_match:
-                        logger.info(f"[{site_name}] 发现数字: {msg_count_match.group(1)}")
-
-                    # 保存HTML用于分析（前2000字符）
-                    logger.info(f"[{site_name}] HTML前500字符: {html[:500]}")
-                else:
-                    logger.info(f"[{site_name}] 消息页面无消息相关内容")
-            else:
-                logger.info(f"[{site_name}] 消息页面访问失败: {resp.status_code if resp else 'None'}")
-
-        except Exception as e:
-            logger.error(f"[{site_name}] 直连消息页面出错: {e}")
 
     def _cleanup_history(self):
         """清理历史记录"""
