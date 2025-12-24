@@ -16,9 +16,9 @@ from app.log import logger
 from app.db.site_oper import SiteOper
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
-from app.modules.indexer.parser import SiteParserBase
-from app.helper.module import ModuleHelper
-from app.utils.string import StringUtils
+from app.helper.sites import SitesHelper
+from app.chain.site import SiteChain
+from app.schemas import Notification
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -33,7 +33,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "3.0"
+    plugin_version = "3.1"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -50,7 +50,7 @@ class SiteUnreadMsgV2(_PluginBase):
     _history: List[Dict[str, Any]] = []
     _exits_key: List[str] = []
     _site_oper: SiteOper = None
-    _site_schemas: List[SiteParserBase] = []
+    _sites_helper: SitesHelper = None
 
     # Configuration attributes
     _enabled: bool = False
@@ -63,16 +63,10 @@ class SiteUnreadMsgV2(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         self._site_oper = SiteOper()
+        self._sites_helper = SitesHelper()
 
         # Stop existing tasks
         self.stop_service()
-
-        # Load site schemas
-        self._site_schemas = ModuleHelper.load(
-            'app.modules.indexer.parser',
-            filter_func=lambda _, obj: hasattr(obj, 'schema') and getattr(obj, 'schema') is not None
-        )
-        logger.info(f"{self.plugin_name}: 加载了 {len(self._site_schemas)} 个站点解析器")
 
         # Configuration
         if config:
@@ -86,38 +80,20 @@ class SiteUnreadMsgV2(_PluginBase):
             raw_unread_sites = config.get("unread_sites") or []
             self._unread_sites = [str(s_id) for s_id in raw_unread_sites]
 
-            # 获取所有站点
-            all_sites = self._site_oper.list()
+            # 验证站点配置
+            self._validate_sites()
 
-            # 使用 getattr 安全获取对象属性
-            valid_site_ids = set()
-            for site in all_sites:
-                # 兼容对象(site.id)和字典(site['id'])
-                if isinstance(site, dict):
-                    s_id = site.get("id")
-                else:
-                    s_id = getattr(site, "id", None)
-
-                if s_id:
-                    valid_site_ids.add(str(s_id))
-
-            # 清理配置
-            self._unread_sites = [
-                site_id for site_id in self._unread_sites
-                if site_id in valid_site_ids
-            ]
             self.__update_config()
 
         if self._enabled or self._onlyonce:
             logger.info(f"{self.plugin_name}: 插件已启用，准备启动服务")
-            logger.info(f"{self.plugin_name}: 配置参数 _enabled={self._enabled}, _onlyonce={self._onlyonce}, _cron={self._cron}")
 
             # Scheduler service
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
             # Run once immediately
             if self._onlyonce:
-                logger.info(f"{self.plugin_name} 服务启动，立即运行一次。")
+                logger.info(f"{self.plugin_name}: 服务启动，立即运行一次。")
                 self._scheduler.add_job(self.refresh_all_site_unread_msg, 'date',
                                         run_date=datetime.now(
                                             tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
@@ -131,9 +107,9 @@ class SiteUnreadMsgV2(_PluginBase):
                     self._scheduler.add_job(func=self.refresh_all_site_unread_msg,
                                             trigger=CronTrigger.from_crontab(self._cron),
                                             name=self.plugin_name)
-                    logger.info(f"{self.plugin_name} 定时任务已注册: {self._cron}")
+                    logger.info(f"{self.plugin_name}: 定时任务已注册: {self._cron}")
                 except Exception as err:
-                    logger.error(f"配置定时任务失败: {err}")
+                    logger.error(f"{self.plugin_name}: 配置定时任务失败: {err}")
                     eventmanager.send_event(
                         EventType.SystemError,
                         {
@@ -145,8 +121,24 @@ class SiteUnreadMsgV2(_PluginBase):
             if self._scheduler.get_jobs():
                 self._scheduler.start()
                 logger.info(f"{self.plugin_name}: 定时任务调度器已启动")
-            else:
-                logger.info(f"{self.plugin_name}: 没有有效的定时任务，调度器未启动")
+
+    def _validate_sites(self):
+        """验证站点配置"""
+        if not self._unread_sites:
+            return
+
+        # 获取所有可用站点
+        all_sites = self._sites_helper.get_indexers()
+        valid_site_ids = {str(site.get("id", "")) for site in all_sites if site.get("id")}
+
+        # 清理无效站点
+        self._unread_sites = [
+            site_id for site_id in self._unread_sites
+            if site_id in valid_site_ids
+        ]
+
+        if len(self._unread_sites) == 0:
+            logger.warning(f"{self.plugin_name}: 配置的站点ID都无效，将检查所有站点")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -160,26 +152,13 @@ class SiteUnreadMsgV2(_PluginBase):
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         try:
-            # 安全获取站点列表
-            if self._site_oper:
-                sites = self._site_oper.list()
-            else:
-                self._site_oper = SiteOper()
-                sites = self._site_oper.list()
-
-            site_options = []
-            for site in sites:
-                # 使用 getattr 安全获取属性
-                # 判断是字典还是对象，分别处理
-                if isinstance(site, dict):
-                    site_id = str(site.get("id", ""))
-                    site_name = site.get("name", "")
-                else:
-                    site_id = str(getattr(site, "id", ""))
-                    site_name = getattr(site, "name", "")
-
-                if site_id and site_name:
-                    site_options.append({"title": site_name, "value": site_id})
+            # 获取所有可用站点
+            all_sites = self._sites_helper.get_indexers()
+            site_options = [
+                {"title": site.get("name", ""), "value": str(site.get("id", ""))}
+                for site in all_sites
+                if site.get("id") and site.get("name")
+            ]
 
             return [
                 {
@@ -224,7 +203,7 @@ class SiteUnreadMsgV2(_PluginBase):
                             'content': [
                                 {
                                     'component': 'VCol',
-                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'unread_sites', 'label': '监控站点', 'items': site_options}}]
+                                    'content': [{'component': 'VSelect', 'props': {'chips': True, 'multiple': True, 'model': 'unread_sites', 'label': '监控站点（不选则监控所有）', 'items': site_options}}]
                                 }
                             ]
                         },
@@ -249,7 +228,7 @@ class SiteUnreadMsgV2(_PluginBase):
                 "unread_sites": []
             }
         except Exception as e:
-            logger.error(f"获取配置页面失败: {str(e)}")
+            logger.error(f"{self.plugin_name}: 获取配置页面失败: {str(e)}")
             return [
                 {
                     'component': 'VAlert',
@@ -273,7 +252,7 @@ class SiteUnreadMsgV2(_PluginBase):
                     {'component': 'td', 'text': data.get("content")},
                     {'component': 'td', 'text': data.get("time")}
                 ]
-            } for data in unread_data
+            } for data in unread_data[:50]  # 只显示最近50条
         ]
 
         return [
@@ -309,112 +288,99 @@ class SiteUnreadMsgV2(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
-            logger.error(f"停止插件服务失败: {str(e)}")
+            logger.error(f"{self.plugin_name}: 停止插件服务失败: {str(e)}")
 
-    def build(self, site_info: CommentedMap) -> Optional[SiteParserBase]:
-        """
-        使用MoviePilot内置的站点解析器构建站点用户信息
-        """
-        site_cookie = site_info.get("cookie")
-        if not site_cookie:
-            logger.info(f"站点 {site_info.get('name')} 无cookie")
-            return None
-
-        site_name = site_info.get("name")
-        url = site_info.get("url")
-        if not url:
-            logger.info(f"站点 {site_name} 无URL")
-            return None
-
-        # 获取站点schema
-        schema = site_info.get("schema")
-        if not schema:
-            logger.info(f"站点 {site_name} 无schema定义")
-            return None
-
-        # 查找匹配的解析器
-        site_parser = None
-        for site_schema in self._site_schemas:
-            if site_schema.schema.value == schema:
-                site_parser = site_schema
-                break
-
-        if not site_parser:
-            logger.info(f"站点 {site_name} schema {schema} 未找到匹配解析器")
-            return None
-
-        apikey = site_info.get("apikey")
-        token = site_info.get("token")
-        proxy_enabled = site_info.get("proxy", False)
-        ua = site_info.get("ua")
+    def refresh_all_site_unread_msg(self):
+        """主任务：刷新所有站点未读消息"""
+        logger.info(f"{self.plugin_name}: 开始检查未读消息...")
 
         try:
-            # 使用MoviePilot内置的站点解析器
-            site_obj = site_parser(
-                site_name=site_name,
-                url=url,
-                site_cookie=site_cookie,
-                apikey=apikey,
-                token=token,
-                ua=ua,
-                proxy=proxy_enabled
-            )
+            # 获取要检查的站点
+            sites = self._get_target_sites()
+            if not sites:
+                logger.info(f"{self.plugin_name}: 没有可检查的站点")
+                return
 
-            # 执行解析
-            site_obj.parse()
+            logger.info(f"{self.plugin_name}: 将检查 {len(sites)} 个站点")
 
-            return site_obj
+            # 加载历史数据
+            self._history = self.get_data("history") or []
+            self._exits_key = [
+                f"{rec['site']}_{rec.get('date')}_{rec['head']}_{str(rec.get('content'))[:50]}"
+                for rec in self._history
+            ]
+
+            # 使用SiteChain刷新数据
+            site_chain = SiteChain()
+            checked_sites = []
+
+            for site in sites:
+                site_name = site.get("name", "Unknown")
+                try:
+                    logger.info(f"[{site_name}] 开始刷新...")
+                    userdata = site_chain.refresh_userdata(site)
+
+                    if userdata:
+                        checked_sites.append(site_name)
+                        logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}")
+
+                        # 处理未读消息
+                        if userdata.message_unread > 0:
+                            self._handle_unread_messages(site_name, userdata)
+                    else:
+                        logger.info(f"[{site_name}] 刷新失败或无数据")
+
+                except Exception as e:
+                    logger.error(f"[{site_name}] 刷新出错: {e}")
+
+            # 清理历史记录
+            self._cleanup_history()
+
+            logger.info(f"{self.plugin_name}: 检查完成，成功检查 {len(checked_sites)} 个站点: {', '.join(checked_sites)}")
 
         except Exception as e:
-            logger.error(f"构建站点 {site_name} 信息失败: {e}")
-            return None
+            logger.error(f"{self.plugin_name}: 主任务执行失败: {e}")
 
-    def __refresh_site_data(self, site_info: CommentedMap):
-        site_name = site_info.get('name')
-        if not site_info.get('url'):
-            logger.info(f"站点 {site_name} 无URL，跳过")
-            return
+    def _get_target_sites(self) -> List[dict]:
+        """获取要检查的站点列表"""
+        all_sites = self._sites_helper.get_indexers()
 
-        try:
-            site_user_info: Optional[SiteParserBase] = self.build(site_info=site_info)
-            if site_user_info:
-                if site_user_info.err_msg and site_user_info.message_unread <= 0:
-                    logger.info(f"站点 {site_name} 解析警告: {site_user_info.err_msg}")
-                    return
+        # 过滤启用的站点
+        active_sites = [s for s in all_sites if s.get("is_active")]
 
-                logger.info(f"站点 {site_name} 未读消息数: {site_user_info.message_unread}")
-                self.__notify_unread_msg(site_name, site_user_info)
-            else:
-                 logger.info(f"无法构建站点 {site_name} 的用户信息")
-        except Exception as e:
-            logger.error(f"站点 {site_name} 刷新错误: {str(e)}")
+        if not self._unread_sites:
+            return active_sites
 
-    def __notify_unread_msg(self, site_name: str, site_user_info: SiteParserBase):
+        # 按配置过滤
+        target_ids = set(self._unread_sites)
+        return [s for s in active_sites if str(s.get("id", "")) in target_ids]
+
+    def _handle_unread_messages(self, site_name: str, userdata):
+        """处理未读消息"""
         if not self._notify:
             return
 
-        if site_user_info.message_unread <= 0:
-            return
-
-        if hasattr(site_user_info, 'message_unread_contents') and site_user_info.message_unread_contents:
-            logger.info(f"Site {site_name} has {len(site_user_info.message_unread_contents)} unread messages.")
-            for head, date_str, content in site_user_info.message_unread_contents:
-                msg_title = f"【站点 {site_user_info.site_name} 消息】"
+        # 有详细内容
+        if userdata.message_unread_contents and len(userdata.message_unread_contents) > 0:
+            for head, date_str, content in userdata.message_unread_contents:
+                msg_title = f"【站点 {site_name} 消息】"
                 msg_text = f"时间：{date_str}\n标题：{head}\n内容：\n{content}"
 
                 key_content_part = str(content)[:50] if content else ""
-                key = f"{site_user_info.site_name}_{date_str}_{head}_{key_content_part}"
+                key = f"{site_name}_{date_str}_{head}_{key_content_part}"
 
                 if key not in self._exits_key:
                     self._exits_key.append(key)
-                    eventmanager.send_event(
-                        EventType.NoticeMessage,
-                        {
-                            "type": NotificationType.SiteMessage,
-                            "title": msg_title,
-                            "text": msg_text,
-                        }
+
+                    # 发送通知
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title=msg_title,
+                        text=msg_text,
+                        link=userdata.url if hasattr(userdata, 'url') else None
                     )
+
+                    # 保存历史
                     self._history.append({
                         "site": site_name,
                         "head": head,
@@ -423,99 +389,50 @@ class SiteUnreadMsgV2(_PluginBase):
                         "date": date_str,
                     })
         else:
-            title = f"{site_user_info.site_name} 有 {site_user_info.message_unread} 条未读消息"
-            text = f"请登录站点查看详情: {site_user_info.url}"
-            key = f"{site_name}_count_{site_user_info.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
+            # 只有数量没有内容
+            title = f"站点 {site_name} 有 {userdata.message_unread} 条未读消息"
+            text = f"请登录站点查看详情"
+            key = f"{site_name}_count_{userdata.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
 
             if key not in self._exits_key:
                 self._exits_key.append(key)
-                eventmanager.send_event(
-                    EventType.NoticeMessage,
-                    {
-                        "type": NotificationType.SiteMessage,
-                        "title": title,
-                        "text": text,
-                    }
+
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title=title,
+                    text=text,
+                    link=userdata.url if hasattr(userdata, 'url') else None
                 )
 
-    def refresh_all_site_unread_msg(self):
-        logger.info(f"{self.plugin_name}: 开始检查未读消息...")
-
-        # 调试：检查站点解析器加载情况
-        if not self._site_schemas:
-            logger.info(f"{self.plugin_name}: 未加载到站点解析器，跳过运行。")
+    def _cleanup_history(self):
+        """清理历史记录"""
+        if not self._history:
             return
 
-        logger.info(f"{self.plugin_name}: 已加载 {len(self._site_schemas)} 个站点解析器")
+        cutoff_timestamp = time.time() - (self._history_days * 24 * 60 * 60)
+        new_history = []
 
-        with lock:
-            all_sites = self._site_oper.list()
-            logger.info(f"{self.plugin_name}: 获取到 {len(all_sites)} 个站点")
+        for record in self._history:
+            try:
+                t_str = record.get("time")
+                if t_str and datetime.strptime(t_str, '%Y-%m-%d %H:%M:%S').timestamp() >= cutoff_timestamp:
+                    new_history.append(record)
+            except Exception:
+                pass
 
-            refresh_sites_config = []
-            if not self._unread_sites:
-                refresh_sites_config = all_sites
-                logger.info(f"{self.plugin_name}: 未指定监控站点，检查所有站点")
-            else:
-                selected_site_ids = set(self._unread_sites)
-                logger.info(f"{self.plugin_name}: 指定监控站点ID: {selected_site_ids}")
+        self._history = new_history
+        self.save_data("history", self._history)
 
-                refresh_sites_config = []
-                for s in all_sites:
-                    if isinstance(s, dict):
-                        sid = str(s.get("id", ""))
-                    else:
-                        sid = str(getattr(s, "id", ""))
-
-                    if sid in selected_site_ids:
-                        refresh_sites_config.append(s)
-
-            if not refresh_sites_config:
-                logger.info(f"{self.plugin_name}: 未配置监控站点。")
-                return
-
-            logger.info(f"{self.plugin_name}: 将检查 {len(refresh_sites_config)} 个站点")
-
-            self._history = self.get_data("history") or []
-            self._exits_key = [
-                f"{rec['site']}_{rec.get('date')}_{rec['head']}_{str(rec.get('content'))[:50]}"
-                for rec in self._history
-            ]
-
-            pool_size = min(len(refresh_sites_config), self._queue_cnt)
-            checked_sites = []
-
-            if pool_size > 0:
-                # 为了调试，先用单线程模式
-                for site_info in refresh_sites_config:
-                    site_name = site_info.get('name') if isinstance(site_info, dict) else getattr(site_info, 'name', 'Unknown')
-                    try:
-                        self.__refresh_site_data(site_info)
-                    except Exception as e:
-                        logger.error(f"{self.plugin_name}: 处理站点 {site_name} 时出错: {e}")
-                    finally:
-                        checked_sites.append(site_name)
-
-            logger.info(f"{self.plugin_name}: 成功检查了 {len(checked_sites)} 个站点消息: {', '.join(checked_sites)}")
-
-            if self._history:
-                cutoff_timestamp = time.time() - (self._history_days * 24 * 60 * 60)
-                new_history = []
-                for record in self._history:
-                    try:
-                        t_str = record.get("time")
-                        if t_str and datetime.strptime(t_str, '%Y-%m-%d %H:%M:%S').timestamp() >= cutoff_timestamp:
-                            new_history.append(record)
-                    except Exception:
-                        pass
-
-                self._history = new_history
-                self.save_data("history", self._history)
-
-            logger.info(f"{self.plugin_name}: 检查完成。")
-
-    def __custom_sites(self) -> List[Any]:
-        return []
+    @eventmanager.register(EventType.SiteDeleted)
+    def site_deleted(self, event: Event):
+        """处理站点删除事件"""
+        site_id_deleted = event.event_data.get("site_id")
+        if site_id_deleted:
+            site_id_str = str(site_id_deleted)
+            if site_id_str in self._unread_sites:
+                self._unread_sites = [s for s in self._unread_sites if s != site_id_str]
+                self.__update_config()
+                logger.info(f"{self.plugin_name}: 站点 {site_id_str} 已从监控列表中移除。")
 
     def __update_config(self):
         self.update_config({
@@ -527,13 +444,3 @@ class SiteUnreadMsgV2(_PluginBase):
             "history_days": self._history_days,
             "unread_sites": self._unread_sites,
         })
-
-    @eventmanager.register(EventType.SiteDeleted)
-    def site_deleted(self, event: Event):
-        site_id_deleted = event.event_data.get("site_id")
-        if site_id_deleted:
-            site_id_str = str(site_id_deleted)
-            if site_id_str in self._unread_sites:
-                self._unread_sites = [s for s in self._unread_sites if s != site_id_str]
-                self.__update_config()
-                logger.info(f"{self.plugin_name}: 站点 {site_id_str} 已从监控列表中移除。")
