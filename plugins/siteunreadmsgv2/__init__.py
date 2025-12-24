@@ -313,15 +313,18 @@ class SiteUnreadMsgV2(_PluginBase):
             # 使用SiteChain刷新数据
             site_chain = SiteChain()
             checked_sites = []
+            lock = Lock()
 
-            for site in sites:
+            # 并发处理函数
+            def process_site(site):
                 site_name = site.get("name", "Unknown")
                 try:
                     logger.info(f"[{site_name}] 开始刷新...")
                     userdata = site_chain.refresh_userdata(site)
 
                     if userdata:
-                        checked_sites.append(site_name)
+                        with lock:
+                            checked_sites.append(site_name)
                         logger.info(f"[{site_name}] 未读消息数: {userdata.message_unread}")
 
                         # 处理未读消息
@@ -332,6 +335,17 @@ class SiteUnreadMsgV2(_PluginBase):
 
                 except Exception as e:
                     logger.error(f"[{site_name}] 刷新出错: {e}")
+
+            # 使用线程池并发处理
+            pool_size = min(len(sites), self._queue_cnt)
+            if pool_size > 1:
+                logger.info(f"{self.plugin_name}: 使用 {pool_size} 个线程并发处理")
+                with ThreadPool(pool_size) as pool:
+                    pool.map(process_site, sites)
+            else:
+                # 单线程处理
+                for site in sites:
+                    process_site(site)
 
             # 清理历史记录
             self._cleanup_history()
