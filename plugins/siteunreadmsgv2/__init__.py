@@ -35,7 +35,7 @@ class SiteUnreadMsgV2(_PluginBase):
     # 插件图标
     plugin_icon = "Synomail_A.png"
     # 插件版本
-    plugin_version = "3.3"
+    plugin_version = "3.5"
     # 插件作者
     plugin_author = "Test"
     # 作者主页
@@ -234,7 +234,7 @@ class SiteUnreadMsgV2(_PluginBase):
                             'content': [
                                 {
                                     'component': 'VCol', 'props': {'cols': 12},
-                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑。强制检查站点会额外请求消息页面，仅在首页不显示消息数时使用。'}}]
+                                    'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '本插件使用MoviePilot内置站点解析逻辑。春天站点会自动使用特殊解析器。强制检查站点会额外请求消息页面，仅在首页不显示消息数时使用。'}}]
                                 }
                             ]
                         }
@@ -412,11 +412,14 @@ class SiteUnreadMsgV2(_PluginBase):
                     site_obj.message_read_force = True
                     site_obj._pase_unread_msgs()
 
-            # 春天站点详细调试
-            if site_name == "春天" and site_obj.message_unread_contents:
-                logger.info(f"[春天] === 消息内容调试 ===")
-                for i, (head, date, content) in enumerate(site_obj.message_unread_contents):
-                    logger.info(f"[春天] 消息[{i}]: head='{head}', date='{date}', content='{content}'")
+            # 春天站点特殊处理：总是使用自定义解析以确保消息被正确提取
+            # 因为春天站点使用layui框架，标准NexusPHP解析器无法正确解析
+            if site_name == "春天":
+                logger.info(f"[春天] 使用自定义解析器处理消息...")
+                # 清除可能由标准解析器产生的错误数据
+                site_obj.message_unread_contents.clear()
+                site_obj.message_unread = 0
+                self._parse_chun_tian_messages(site_obj)
 
             return SiteUserData(
                 domain=site.get("url"),
@@ -441,6 +444,179 @@ class SiteUnreadMsgV2(_PluginBase):
         finally:
             site_obj.clear()
 
+    def _parse_chun_tian_messages(self, site_obj: SiteParserBase):
+        """自定义解析春天站点的layui框架消息内容"""
+        from lxml import etree
+        from app.utils.string import StringUtils
+
+        # 获取站点名称用于日志
+        site_name = getattr(site_obj, '_site_name', '未知站点')
+
+        try:
+            # 获取消息列表页面
+            msg_list_html = site_obj._get_page_content(
+                url=urljoin(site_obj._base_url, site_obj._user_mail_unread_page),
+                params=site_obj._mail_unread_params,
+                headers=site_obj._mail_unread_headers
+            )
+
+            if not msg_list_html:
+                logger.info(f"[{site_name}] 无法获取消息列表页面")
+                return
+
+            # === 自定义解析消息链接（针对layui框架）===
+            msg_links = []
+            html = etree.HTML(msg_list_html)
+            if not StringUtils.is_valid_html_element(html):
+                logger.info(f"[{site_name}] 消息列表HTML无效")
+                return
+
+            # 方法1: 标准NexusPHP格式
+            links = html.xpath('//tr[not(./td/img[@alt="Read"])]/td/a[contains(@href, "viewmessage")]/@href')
+            if links:
+                msg_links.extend(links)
+                logger.debug(f"[{site_name}] 方法1找到 {len(links)} 条链接")
+
+            # 方法2: layui框架的卡片式布局
+            if not msg_links:
+                links = html.xpath('//div[contains(@class, "layui-card")]//a[contains(@href, "viewmessage")]/@href')
+                if links:
+                    msg_links.extend(links)
+                    logger.debug(f"[{site_name}] 方法2找到 {len(links)} 条链接")
+
+            # 方法3: 任意包含viewmessage的链接
+            if not msg_links:
+                links = html.xpath('//a[contains(@href, "viewmessage")]/@href')
+                if links:
+                    msg_links.extend(links)
+                    logger.debug(f"[{site_name}] 方法3找到 {len(links)} 条链接")
+
+            # 去重
+            msg_links = list(set(msg_links))
+
+            if not msg_links:
+                logger.info(f"[{site_name}] 未找到消息链接")
+                return
+
+            logger.info(f"[{site_name}] 找到 {len(msg_links)} 条消息链接，开始逐个解析...")
+
+            # 逐个解析消息内容
+            for msg_link in msg_links:
+                msg_url = urljoin(site_obj._base_url, msg_link)
+                msg_html = site_obj._get_page_content(
+                    url=msg_url,
+                    params=site_obj._mail_content_params,
+                    headers=site_obj._mail_content_headers
+                )
+
+                if not msg_html:
+                    logger.info(f"[{site_name}] 无法获取消息内容: {msg_url}")
+                    continue
+
+                # 使用自定义XPath解析
+                html = etree.HTML(msg_html)
+                if not StringUtils.is_valid_html_element(html):
+                    logger.info(f"[{site_name}] HTML无效: {msg_url}")
+                    continue
+
+                # === 标题解析 ===
+                head = None
+                head_nodes = html.xpath('//h1/text()')
+                if head_nodes:
+                    head = head_nodes[0].strip()
+                    logger.debug(f"[{site_name}] 标题: {head}")
+
+                # === 时间解析 ===
+                date = None
+
+                # 方法1: layui-card-header 中的 span
+                date_nodes = html.xpath('//div[@class="layui-card-header"]//span[2]/text()')
+                if date_nodes:
+                    date = date_nodes[0].strip()
+
+                # 方法2: layui-card-header 中 span 的 title 属性
+                if not date:
+                    date_nodes = html.xpath('//div[@class="layui-card-header"]//span/@title')
+                    if date_nodes:
+                        date = date_nodes[0].strip()
+
+                # 方法3: 标准NexusPHP格式
+                if not date:
+                    date_nodes = html.xpath('//h1/following-sibling::table[.//tr/td[@class="colhead"]]//tr[2]/td[2]//text()')
+                    if date_nodes:
+                        date = date_nodes[0].strip()
+
+                # 方法4: span title 属性
+                if not date:
+                    date_nodes = html.xpath('//span[@title]/@title')
+                    if date_nodes:
+                        date = date_nodes[0].strip()
+
+                # 方法5: 表格第二行
+                if not date:
+                    date_nodes = html.xpath('//table//tr[2]//td[2]//text()')
+                    if date_nodes:
+                        date = date_nodes[0].strip()
+
+                if date:
+                    date = StringUtils.unify_datetime_str(date)
+
+                # === 内容解析 ===
+                content = None
+
+                # 方法1: layui-card-body
+                content_nodes = html.xpath('//div[@class="layui-card-body"]//text()')
+                if content_nodes:
+                    content = ' '.join([n.strip() for n in content_nodes if n.strip()])
+
+                # 方法2: 标准NexusPHP格式
+                if not content:
+                    content_nodes = html.xpath('//h1/following-sibling::table[.//tr/td[@class="colhead"]]//tr[3]/td//text()')
+                    if content_nodes:
+                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
+
+                # 方法3: 表格第三行 [colspan="2"]
+                if not content:
+                    content_nodes = html.xpath('//table//tr[3]//td[@colspan="2"]//text()')
+                    if content_nodes:
+                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
+
+                # 方法4: 包含"感谢"的文本
+                if not content:
+                    content_nodes = html.xpath('//td[contains(text(), "感谢")]/text()')
+                    if content_nodes:
+                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
+
+                # 方法5: 查找所有 td 的文本
+                if not content:
+                    content_nodes = html.xpath('//td//text()')
+                    if content_nodes:
+                        content = ' '.join([n.strip() for n in content_nodes if n.strip()])
+
+                logger.debug(f"[{site_name}] 解析结果 - 标题='{head}', 时间='{date}', 内容='{content[:50] if content else None}...'")
+
+                # 添加到结果
+                if head or date or content:
+                    # 如果某个字段缺失，从上下文补全
+                    if not head:
+                        head = "无标题"
+                    if not date:
+                        date = "未知时间"
+                    if not content:
+                        content = "无内容"
+                    site_obj.message_unread_contents.append((head, date, content))
+
+            # 更新未读消息数
+            if site_obj.message_unread_contents:
+                site_obj.message_unread = len(site_obj.message_unread_contents)
+
+            logger.info(f"[{site_name}] 自定义解析完成: {len(site_obj.message_unread_contents)} 条消息")
+
+        except Exception as e:
+            logger.error(f"[{site_name}] 自定义解析出错: {e}")
+            import traceback
+            logger.error(f"[{site_name}] 详细错误: {traceback.format_exc()}")
+
     def _should_force_check(self, site: dict) -> bool:
         """判断是否需要强制检查消息页面"""
         site_id = str(site.get("id", ""))
@@ -452,7 +628,9 @@ class SiteUnreadMsgV2(_PluginBase):
             return True
 
         # 策略2：基于站点名称判断（向后兼容）
-        if site_name in ["春天"]:
+        # 这些站点首页不显示消息数，需要强制检查
+        force_sites = ["春天"]
+        if site_name in force_sites:
             return True
 
         return False
