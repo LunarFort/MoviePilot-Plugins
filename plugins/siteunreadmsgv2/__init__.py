@@ -72,6 +72,7 @@ class SiteUnreadMsgV2(_PluginBase):
             'app.modules.indexer.parser',
             filter_func=lambda _, obj: hasattr(obj, 'schema') and getattr(obj, 'schema') is not None
         )
+        logger.debug(f"{self.plugin_name}: 加载了 {len(self._site_schemas)} 个站点解析器")
 
         # Configuration
         if config:
@@ -108,6 +109,9 @@ class SiteUnreadMsgV2(_PluginBase):
             self.__update_config()
 
         if self._enabled or self._onlyonce:
+            logger.info(f"{self.plugin_name}: 插件已启用，准备启动服务")
+            logger.debug(f"{self.plugin_name}: _enabled={self._enabled}, _onlyonce={self._onlyonce}, _cron={self._cron}")
+
             # Scheduler service
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
 
@@ -140,6 +144,9 @@ class SiteUnreadMsgV2(_PluginBase):
 
             if self._scheduler.get_jobs():
                 self._scheduler.start()
+                logger.info(f"{self.plugin_name}: 定时任务调度器已启动")
+            else:
+                logger.warning(f"{self.plugin_name}: 没有有效的定时任务，调度器未启动")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -310,11 +317,13 @@ class SiteUnreadMsgV2(_PluginBase):
         """
         site_cookie = site_info.get("cookie")
         if not site_cookie:
+            logger.debug(f"Site {site_info.get('name')} has no cookie")
             return None
 
         site_name = site_info.get("name")
         url = site_info.get("url")
         if not url:
+            logger.debug(f"Site {site_name} has no URL")
             return None
 
         # 获取站点schema
@@ -331,7 +340,7 @@ class SiteUnreadMsgV2(_PluginBase):
                 break
 
         if not site_parser:
-            logger.debug(f"Site {site_name} schema {schema} not found")
+            logger.debug(f"Site {site_name} schema {schema} not found in {len(self._site_schemas)} schemas")
             return None
 
         apikey = site_info.get("apikey")
@@ -363,6 +372,7 @@ class SiteUnreadMsgV2(_PluginBase):
     def __refresh_site_data(self, site_info: CommentedMap):
         site_name = site_info.get('name')
         if not site_info.get('url'):
+            logger.debug(f"Site {site_name} has no URL, skipping")
             return
 
         try:
@@ -372,6 +382,7 @@ class SiteUnreadMsgV2(_PluginBase):
                     logger.debug(f"Site {site_name} parse warning: {site_user_info.err_msg}")
                     return
 
+                logger.debug(f"Site {site_name} message_unread: {site_user_info.message_unread}")
                 self.__notify_unread_msg(site_name, site_user_info)
             else:
                  logger.debug(f"Could not build site user info for {site_name}")
@@ -428,20 +439,26 @@ class SiteUnreadMsgV2(_PluginBase):
                 )
 
     def refresh_all_site_unread_msg(self):
+        logger.info(f"{self.plugin_name}: 开始检查未读消息...")
+
+        # 调试：检查站点解析器加载情况
         if not self._site_schemas:
             logger.warning(f"{self.plugin_name}: 未加载到站点解析器，跳过运行。")
             return
 
-        logger.info(f"{self.plugin_name}: 开始检查未读消息...")
+        logger.debug(f"{self.plugin_name}: 已加载 {len(self._site_schemas)} 个站点解析器")
 
         with lock:
             all_sites = self._site_oper.list()
+            logger.debug(f"{self.plugin_name}: 获取到 {len(all_sites)} 个站点")
 
             refresh_sites_config = []
             if not self._unread_sites:
                 refresh_sites_config = all_sites
+                logger.debug(f"{self.plugin_name}: 未指定监控站点，检查所有站点")
             else:
                 selected_site_ids = set(self._unread_sites)
+                logger.debug(f"{self.plugin_name}: 指定监控站点ID: {selected_site_ids}")
 
                 refresh_sites_config = []
                 for s in all_sites:
@@ -456,6 +473,8 @@ class SiteUnreadMsgV2(_PluginBase):
             if not refresh_sites_config:
                 logger.info(f"{self.plugin_name}: 未配置监控站点。")
                 return
+
+            logger.debug(f"{self.plugin_name}: 将检查 {len(refresh_sites_config)} 个站点")
 
             self._history = self.get_data("history") or []
             self._exits_key = [
