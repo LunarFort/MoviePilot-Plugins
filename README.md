@@ -1,6 +1,12 @@
 # MoviePilot-Plugins
 MoviePilot官方插件市场：https://github.com/jxxghp/MoviePilot-Plugins
 
+---
+### 新增插件
+
+- [阡陌居签到（代理版）](plugins%2Fqmjsignpro)
+- [站点未读消息V2](plugins%2Fsiteunreadmsgv2)
+---
 ## 目录
 - [第三方插件库开发说明](#第三方插件库开发说明)
   - [1. 目录结构](#1-目录结构)
