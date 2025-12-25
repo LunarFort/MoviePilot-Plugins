@@ -365,7 +365,7 @@ class SiteUnreadMsgV2(_PluginBase):
         try:
             logger.info(f"[{site_name}] 开始刷新...")
 
-            # 直接使用解析器，绕过SiteChain的限制
+            # 获取站点用户数据
             userdata = self._get_site_userdata(site)
 
             if not userdata:
@@ -410,18 +410,17 @@ class SiteUnreadMsgV2(_PluginBase):
 
         try:
             site_name = site.get("name")
-            site_id = str(site.get("id", ""))
-            logger.info(f"站点 {site_name} 开始以 {site.get('schema')} 模型解析数据...")
-            site_obj.parse()
-            logger.debug(f"站点 {site_name} 数据解析完成")
 
             # 春天站点特殊处理：消息详情页面结构不同，需要自定义解析
-            # 无论标准解析器是否解析到未读数，都使用自定义解析器获取消息内容
+            # 直接使用自定义解析器，跳过标准解析
             if site_name == "春天":
                 logger.info(f"[{site_name}] 使用自定义解析器...")
-                # 清空标准解析器可能解析到的不完整内容
-                site_obj.message_unread_contents.clear()
                 self._parse_ssd_messages(site_obj)
+            else:
+                # 其他站点使用标准解析
+                logger.info(f"站点 {site_name} 开始以 {site.get('schema')} 模型解析数据...")
+                site_obj.parse()
+                logger.debug(f"站点 {site_name} 数据解析完成")
 
             return SiteUserData(
                 domain=site.get("url"),
@@ -477,6 +476,8 @@ class SiteUnreadMsgV2(_PluginBase):
             new_msg_indicator = html.xpath('//img[contains(@title, "有新短讯")]')
             if not new_msg_indicator:
                 logger.debug(f"[{site_name}] 无新短讯")
+                # 同步清零未读数量，避免标准解析器的数量与实际不符
+                site_obj.message_unread = 0
                 return
 
             logger.info(f"[{site_name}] 检测到'有新短讯'，开始获取消息...")
@@ -521,8 +522,7 @@ class SiteUnreadMsgV2(_PluginBase):
             logger.debug(f"[{site_name}] box={box_type} 找到 {len(msg_links)} 条未读消息链接")
 
         # 更新未读消息数
-        if unread_msg_links:
-            site_obj.message_unread = len(unread_msg_links)
+        site_obj.message_unread = len(unread_msg_links)
 
         # 解析每条消息的内容
         for msg_link in unread_msg_links:
@@ -626,32 +626,32 @@ class SiteUnreadMsgV2(_PluginBase):
                 logger.info(f"[{site_name}] 消息key: {key}")
                 logger.info(f"[{site_name}] 已存在key: {self._exits_key}")
 
-                if key not in self._exits_key:
-                    logger.info(f"[{site_name}] 新消息，准备发送通知")
+                with lock:
+                    if key in self._exits_key:
+                        logger.info(f"[{site_name}] 消息已存在，跳过发送")
+                        continue
+                    self._exits_key.append(key)
 
-                    with lock:
-                        self._exits_key.append(key)
+                logger.info(f"[{site_name}] 新消息，准备发送通知")
 
-                    # 发送通知
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title=msg_title,
-                        text=msg_text,
-                        link=userdata.url if hasattr(userdata, 'url') else None
-                    )
-                    logger.info(f"[{site_name}] 通知已发送: {msg_title}")
+                # 发送通知
+                self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title=msg_title,
+                    text=msg_text,
+                    link=userdata.url if hasattr(userdata, 'url') else None
+                )
+                logger.info(f"[{site_name}] 通知已发送: {msg_title}")
 
-                    # 保存历史
-                    with lock:
-                        self._history.append({
-                            "site": site_name,
-                            "head": head,
-                            "content": content,
-                            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "date": date_str,
-                        })
-                else:
-                    logger.info(f"[{site_name}] 消息已存在，跳过发送")
+                # 保存历史
+                with lock:
+                    self._history.append({
+                        "site": site_name,
+                        "head": head,
+                        "content": content,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "date": date_str,
+                    })
         else:
             # 只有数量没有内容
             logger.info(f"[{site_name}] 无消息详情内容，仅数量: {userdata.message_unread}")
@@ -659,18 +659,19 @@ class SiteUnreadMsgV2(_PluginBase):
             text = f"请登录站点查看详情"
             key = f"{site_name}_count_{userdata.message_unread}_{datetime.now().strftime('%Y%m%d%H')}"
 
-            if key not in self._exits_key:
-                with lock:
-                    self._exits_key.append(key)
-                self.post_message(
-                    mtype=NotificationType.SiteMessage,
-                    title=title,
-                    text=text,
-                    link=userdata.url if hasattr(userdata, 'url') else None
-                )
-                logger.info(f"[{site_name}] 数量通知已发送")
-            else:
-                logger.info(f"[{site_name}] 数量通知已存在，跳过")
+            with lock:
+                if key in self._exits_key:
+                    logger.info(f"[{site_name}] 数量通知已存在，跳过")
+                    return
+                self._exits_key.append(key)
+
+            self.post_message(
+                mtype=NotificationType.SiteMessage,
+                title=title,
+                text=text,
+                link=userdata.url if hasattr(userdata, 'url') else None
+            )
+            logger.info(f"[{site_name}] 数量通知已发送")
 
     def _cleanup_history(self):
         """清理历史记录"""
